@@ -505,9 +505,6 @@ class Thread: public ThreadShadow {
   }
 
  public:
-  // Used by fast lock support
-  virtual bool is_lock_owned(address adr) const;
-
   // Check if address is within the given range of this thread's
   // stack:  stack_base() > adr >= limit
   bool is_in_stack_range_incl(address adr, address limit) const {
@@ -1284,8 +1281,6 @@ private:
 
   // Fast-locking support
   bool is_lock_owned(address adr) const;
-  bool is_lock_owned_current(address adr) const; // virtual if mounted, otherwise whole thread
-  bool is_lock_owned_carrier(address adr) const;
 
   // Accessors for vframe array top
   // The linked list of vframe arrays are sorted on sp. This means when we

@@ -673,10 +673,6 @@ void Thread::print_owned_locks_on(outputStream* st) const {
 // used for compilation in the future. If that change is made, the need for these methods
 // should be revisited, and they should be removed if possible.
 
-bool Thread::is_lock_owned(address adr) const {
-  return is_in_full_stack(adr);
-}
-
 bool Thread::set_as_starting_thread() {
   assert(_starting_thread == NULL, "already initialized: "
          "_starting_thread=" INTPTR_FORMAT, p2i(_starting_thread));
@@ -1584,16 +1580,6 @@ JavaThread* JavaThread::active() {
 }
 
 bool JavaThread::is_lock_owned(address adr) const {
-  if (Thread::is_lock_owned(adr)) return true;
-
-  for (MonitorChunk* chunk = monitor_chunks(); chunk != NULL; chunk = chunk->next()) {
-    if (chunk->contains(adr)) return true;
-  }
-
-  return false;
-}
-
-bool JavaThread::is_lock_owned_current(address adr) const {
   address stack_end = _stack_base - _stack_size;
   const ContinuationEntry* ce = vthread_continuation();
   address stack_base = ce != nullptr ? (address)ce->entry_sp() : _stack_base;
@@ -1606,13 +1592,6 @@ bool JavaThread::is_lock_owned_current(address adr) const {
   }
 
   return false;
-}
-
-bool JavaThread::is_lock_owned_carrier(address adr) const {
-  assert(is_vthread_mounted(), "");
-  address stack_end = _stack_base - _stack_size;
-  address stack_base = (address)vthread_continuation()->entry_sp();
-  return stack_base > adr && adr >= stack_end;
 }
 
 oop JavaThread::exception_oop() const {

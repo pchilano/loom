@@ -902,7 +902,7 @@ intptr_t ObjectSynchronizer::FastHashCode(Thread* current, oop obj) {
       }
       // Fall thru so we only have one place that installs the hash in
       // the ObjectMonitor.
-    } else if (current->is_lock_owned((address)mark.locker())) {
+    } else if (current->is_Java_thread() && JavaThread::cast(current)->is_lock_owned((address)mark.locker())) {
       // This is a stack lock owned by the calling thread so fetch the
       // displaced markWord from the BasicLock on the stack.
       temp = mark.displaced_mark_helper();
@@ -976,14 +976,35 @@ bool ObjectSynchronizer::current_thread_holds_lock(JavaThread* current,
 
   // Uncontended case, header points to stack
   if (mark.has_locker()) {
-    return current->is_lock_owned((address)mark.locker()); // is_lock_owned_current((address)mark.locker()); see JDK-8281642
+    return current->is_lock_owned((address)mark.locker());
   }
   // Contended case, header points to ObjectMonitor (tagged pointer)
   if (mark.has_monitor()) {
     // The first stage of async deflation does not affect any field
     // used by this comparison so the ObjectMonitor* is usable here.
     ObjectMonitor* monitor = mark.monitor();
-    return monitor->is_entered(current) != 0;
+    bool is_entered = monitor->is_entered(current);
+    if (is_entered && current->vthread_continuation()) {
+      // There is a vthread mounted so check who is the actual owner
+      ResourceMark rmark(current);
+      RegisterMap rm(current);
+      for (javaVFrame* vf = current->vthread_carrier_last_java_vframe(&rm); vf != NULL; vf = vf->java_sender()) {
+        GrowableArray<MonitorInfo*> *monitors = vf->monitors();
+        if (monitors != NULL) {
+          int len = monitors->length();
+          // Walk monitors youngest to oldest
+          for (int i = len - 1; i >= 0; i--) {
+            MonitorInfo* mon_info = monitors->at(i);
+            if (mon_info->owner() == obj) {
+              // carrier is the owner
+              return false;
+            }
+          }
+        }
+      }
+      return true;
+    }
+    return is_entered;
   }
   // Unlocked case, header in place
   assert(mark.is_neutral(), "sanity check");

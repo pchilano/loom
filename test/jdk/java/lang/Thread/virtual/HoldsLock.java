@@ -23,6 +23,7 @@
 
 /**
  * @test
+ * @bug 8281642
  * @summary Test Thread.holdsLock when lock held by carrier thread
  * @modules java.base/java.lang:+open
  * @compile --enable-preview -source ${jdk.version} HoldsLock.java TestHelper.java
@@ -46,15 +47,16 @@ import org.testng.annotations.Test;
 import static org.testng.Assert.*;
 
 public class HoldsLock {
-    static final Object LOCK1 = new Object();
+    static final Object LOCK1A = new Object();
+    static final Object LOCK1B = new Object();
     static final Object LOCK2 = new Object();
 
-    @Test(enabled=false) // JDK-8281642
+    @Test
     public void testHoldsLock() throws Exception {
         var q = new ArrayBlockingQueue<Runnable>(5);
 
         Thread carrier = Thread.ofPlatform().start(() -> {
-            synchronized (LOCK1) {
+            synchronized (LOCK1A) {
                 eventLoop(q);
             }
         });
@@ -66,7 +68,7 @@ public class HoldsLock {
 
             synchronized (LOCK2) {
                 assertTrue(Thread.holdsLock(LOCK2)); // virtual thread holds lock2
-                assertFalse(Thread.holdsLock(LOCK1)); // carrier thread holds lock1
+                assertFalse(Thread.holdsLock(LOCK1A)); // carrier thread holds lock1
             }
         });
 
@@ -80,9 +82,9 @@ public class HoldsLock {
 
         Thread carrier = spawnCarrier(q);
         Thread vthread = spawnVirtual(executor(q), () -> {
-            synchronized (LOCK1) {
+            synchronized (LOCK1B) {
                 try {
-                    LOCK1.wait();
+                    LOCK1B.wait();
                 } catch (InterruptedException e) {}
             }
         });
@@ -90,12 +92,12 @@ public class HoldsLock {
         while (vthread.getState() != Thread.State.WAITING) {
             Thread.sleep(10);
         }
-        System.out.format("%s is waiting on %s%n", vthread, LOCK1);
+        System.out.format("%s is waiting on %s%n", vthread, LOCK1B);
         long vthreadId = vthread.getId();
         long carrierId = carrier.getId();
 
-        System.out.format("\t\t%s%n", LOCK1);
-        String lockAsString = LOCK1.toString();
+        System.out.format("\t\t%s%n", LOCK1B);
+        String lockAsString = LOCK1B.toString();
 
         ThreadMXBean bean = ManagementFactory.getThreadMXBean();
         long[] tids = bean.getAllThreadIds();
