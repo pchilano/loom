@@ -363,6 +363,7 @@ protected:
 
 public:
   NOINLINE freeze_result freeze_slow();
+  void freeze_fast_existing_chunk();
 
   CONT_JFR_ONLY(FreezeThawJfrInfo& jfr_info() { return _jfr_info; })
   void set_jvmti_event_collector(JvmtiSampledObjectAllocEventCollector* jsoaec) { _jvmti_event_collector = jsoaec; }
@@ -412,7 +413,6 @@ private:
 
 protected:
   void freeze_fast_copy(stackChunkOop chunk, int chunk_start_sp);
-  void freeze_fast_existing_chunk();
   bool freeze_fast_new_chunk(stackChunkOop chunk);
 };
 
@@ -425,7 +425,7 @@ public:
   inline Freeze(JavaThread* thread, ContinuationWrapper& cont, intptr_t* frame_sp)
     : FreezeBase(thread, cont, frame_sp) {}
 
-  template <bool chunk_available> freeze_result try_freeze_fast();
+  freeze_result try_freeze_fast();
 
 protected:
   virtual stackChunkOop allocate_chunk_slow(size_t stack_size) override { return allocate_chunk(stack_size); }
@@ -499,16 +499,10 @@ void FreezeBase::unwind_frames() {
 }
 
 template <typename ConfigT>
-template <bool chunk_available>
 freeze_result Freeze<ConfigT>::try_freeze_fast() {
-  if (chunk_available) {
-    freeze_fast_existing_chunk();
+  stackChunkOop chunk = allocate_chunk(_cont_size + frame::metadata_words);
+  if (freeze_fast_new_chunk(chunk)) {
     return freeze_ok;
-  } else {
-    stackChunkOop chunk = allocate_chunk(_cont_size + frame::metadata_words);
-    if (freeze_fast_new_chunk(chunk)) {
-      return freeze_ok;
-    }
   }
   if (_thread->has_pending_exception()) {
     return freeze_exception;
@@ -1401,8 +1395,7 @@ static inline int freeze_internal(JavaThread* current, intptr_t* const sp) {
 
   bool fast = can_freeze_fast(current);
   if (fast && freeze.is_chunk_available_for_fast_freeze() > 0) {
-    freeze_result res = freeze.template try_freeze_fast<true>();
-    assert(res == freeze_ok, "");
+    freeze.freeze_fast_existing_chunk();
     CONT_JFR_ONLY(fr.jfr_info().post_jfr_event(&event, oopCont, current);)
     freeze_epilog(current, cont);
     StackWatermarkSet::after_unwind(current);
@@ -1416,7 +1409,7 @@ static inline int freeze_internal(JavaThread* current, intptr_t* const sp) {
     JvmtiSampledObjectAllocEventCollector jsoaec(false);
     freeze.set_jvmti_event_collector(&jsoaec);
 
-    freeze_result res = fast ? freeze.template try_freeze_fast<false>()
+    freeze_result res = fast ? freeze.try_freeze_fast()
                              : freeze.freeze_slow();
     CONT_JFR_ONLY(fr.jfr_info().post_jfr_event(&event, oopCont, current);)
     freeze_epilog(current, cont, res);
