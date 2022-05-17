@@ -131,8 +131,8 @@ Address |   |                            |    |   Caller is still in the chunk.
             |                            |    |
             |----------------------------| <--/
             |                            |
-            |    doYield/safepoint stub  | When preempting forcefully, we could have a safepoint stub
-            |                            | instead of a doYield stub
+            |    doYield                 |
+            |                            |
             |============================| <- the sp passed to freeze
             |                            |
             |  Native freeze/thaw frames |
@@ -209,7 +209,7 @@ const char* freeze_result_names[6] = {
   "freeze_exception"
 };
 
-static freeze_result is_pinned0(JavaThread* thread, oop cont_scope, bool safepoint);
+static freeze_result is_pinned0(JavaThread* thread, oop cont_scope);
 template<typename ConfigT> static inline int freeze_internal(JavaThread* current, intptr_t* const sp);
 
 static inline int prepare_thaw_internal(JavaThread* thread, bool return_barrier);
@@ -245,7 +245,7 @@ JRT_END
 
 JVM_ENTRY(jint, CONT_isPinned0(JNIEnv* env, jobject cont_scope)) {
   JavaThread* thread = JavaThread::thread_from_jni_environment(env);
-  return is_pinned0(thread, JNIHandles::resolve(cont_scope), false);
+  return is_pinned0(thread, JNIHandles::resolve(cont_scope));
 }
 JVM_END
 
@@ -343,7 +343,6 @@ protected:
   JavaThread* const _thread;
   ContinuationWrapper& _cont;
   bool _barriers; // only set when we allocate a chunk
-  const bool _preempt; // used only on the slow path
   const intptr_t * const _frame_sp; // Top frame sp for this freeze
 
   intptr_t* _bottom_address;
@@ -395,10 +394,7 @@ protected:
 
 private:
   // slow path
-  frame freeze_start_frame();
-  frame freeze_start_frame_safepoint_stub(frame f);
-  NOINLINE freeze_result recurse_freeze(frame& f, frame& caller, int callee_argsize, bool callee_interpreted, bool top);
-  inline frame freeze_start_frame_yield_stub(frame f);
+  NOINLINE freeze_result recurse_freeze(frame& f, frame& caller, int callee_argsize, bool callee_interpreted);
   template<typename FKind>
   inline freeze_result recurse_freeze_java_frame(const frame& f, frame& caller, int fsize, int argsize);
   inline void before_freeze_java_frame(const frame& f, const frame& caller, int fsize, int argsize, bool is_bottom_frame);
@@ -407,7 +403,6 @@ private:
   void patch(const frame& f, frame& hf, const frame& caller, bool is_bottom_frame);
   NOINLINE freeze_result recurse_freeze_interpreted_frame(frame& f, frame& caller, int callee_argsize, bool callee_interpreted);
   freeze_result recurse_freeze_compiled_frame(frame& f, frame& caller, int callee_argsize, bool callee_interpreted);
-  NOINLINE freeze_result recurse_freeze_stub_frame(frame& f, frame& caller);
   NOINLINE void finish_freeze(const frame& f, const frame& top);
 
   inline bool stack_overflow();
@@ -450,7 +445,7 @@ protected:
 };
 
 FreezeBase::FreezeBase(JavaThread* thread, ContinuationWrapper& cont, intptr_t* frame_sp) :
-    _thread(thread), _cont(cont), _barriers(false), _preempt(false), _frame_sp(frame_sp) {
+    _thread(thread), _cont(cont), _barriers(false), _frame_sp(frame_sp) {
   DEBUG_ONLY(_jvmti_event_collector = nullptr;)
 
   assert(_thread != nullptr, "");
@@ -714,13 +709,15 @@ NOINLINE freeze_result FreezeBase::freeze_slow() {
 #endif
 
   log_develop_trace(continuations)("freeze_slow  #" INTPTR_FORMAT, _cont.hash());
-  assert(_thread->thread_state() == _thread_in_vm || _thread->thread_state() == _thread_blocked, "");
+  assert(_thread->thread_state() == _thread_in_vm, "");
 
   init_rest();
 
   HandleMark hm(Thread::current());
 
-  frame f = freeze_start_frame();
+  frame f = _thread->last_frame();
+  assert(StubRoutines::cont_doYield_stub()->contains(f.pc()), "");
+  f = sender<ContinuationHelper::StubFrame>(f);
 
   LogTarget(Debug, continuations) lt;
   if (lt.develop_is_enabled()) {
@@ -729,7 +726,7 @@ NOINLINE freeze_result FreezeBase::freeze_slow() {
   }
 
   frame caller; // the frozen caller in the chunk
-  freeze_result res = recurse_freeze(f, caller, 0, false, true);
+  freeze_result res = recurse_freeze(f, caller, 0, false);
 
   if (res == freeze_ok) {
     finish_freeze(f, caller);
@@ -739,42 +736,9 @@ NOINLINE freeze_result FreezeBase::freeze_slow() {
   return res;
 }
 
-frame FreezeBase::freeze_start_frame() {
-  frame f = _thread->last_frame();
-  if (LIKELY(!_preempt)) {
-    assert(StubRoutines::cont_doYield_stub()->contains(f.pc()), "");
-    return freeze_start_frame_yield_stub(f);
-  } else {
-    return freeze_start_frame_safepoint_stub(f);
-  }
-}
-
-frame FreezeBase::freeze_start_frame_yield_stub(frame f) {
-  assert(StubRoutines::cont_doYield_stub()->contains(f.pc()), "must be");
-  f = sender<ContinuationHelper::StubFrame>(f);
-  return f;
-}
-
-frame FreezeBase::freeze_start_frame_safepoint_stub(frame f) {
-#if (defined(X86) || defined(AARCH64)) && !defined(ZERO)
-  f.set_fp(f.real_fp()); // f.set_fp(*Frame::callee_link_address(f)); // ????
-#else
-  Unimplemented();
-#endif
-  if (!Interpreter::contains(f.pc())) {
-    assert(ContinuationHelper::Frame::is_stub(f.cb()), "must be");
-    assert(f.oop_map() != nullptr, "must be");
-
-    if (Interpreter::contains(ContinuationHelper::StubFrame::return_pc(f))) {
-      f = sender<ContinuationHelper::StubFrame>(f); // Safepoint stub in interpreter
-    }
-  }
-  return f;
-}
-
-NOINLINE freeze_result FreezeBase::recurse_freeze(frame& f, frame& caller, int callee_argsize, bool callee_interpreted, bool top) {
+NOINLINE freeze_result FreezeBase::recurse_freeze(frame& f, frame& caller, int callee_argsize, bool callee_interpreted) {
   assert(f.unextended_sp() < _bottom_address, ""); // see recurse_freeze_java_frame
-  assert(f.is_interpreted_frame() || ((top && _preempt) == ContinuationHelper::Frame::is_stub(f.cb())), "");
+  assert(f.is_interpreted_frame() || (!ContinuationHelper::Frame::is_stub(f.cb())), "");
 
   if (stack_overflow()) {
     return freeze_exception;
@@ -787,15 +751,8 @@ NOINLINE freeze_result FreezeBase::recurse_freeze(frame& f, frame& caller, int c
     }
     return recurse_freeze_compiled_frame(f, caller, callee_argsize, callee_interpreted);
   } else if (f.is_interpreted_frame()) {
-    assert((_preempt && top) || !f.interpreter_frame_method()->is_native(), "");
-    if (_preempt && top && f.interpreter_frame_method()->is_native()) {
-      // int native entry
-      return freeze_pinned_native;
-    }
-
+    assert(!f.interpreter_frame_method()->is_native(), "should have reached a call stub first");
     return recurse_freeze_interpreted_frame(f, caller, callee_argsize, callee_interpreted);
-  } else if (_preempt && top && ContinuationHelper::Frame::is_stub(f.cb())) {
-    return recurse_freeze_stub_frame(f, caller);
   } else {
     return freeze_pinned_native;
   }
@@ -819,7 +776,7 @@ inline freeze_result FreezeBase::recurse_freeze_java_frame(const frame& f, frame
   } else {
     frame senderf = sender<FKind>(f);
     assert(FKind::interpreted || senderf.sp() == senderf.unextended_sp(), "");
-    freeze_result result = recurse_freeze(senderf, caller, argsize, FKind::interpreted, false); // recursive call
+    freeze_result result = recurse_freeze(senderf, caller, argsize, FKind::interpreted); // recursive call
     return result;
   }
 }
@@ -1131,47 +1088,6 @@ freeze_result FreezeBase::recurse_freeze_compiled_frame(frame& f, frame& caller,
   return freeze_ok;
 }
 
-NOINLINE freeze_result FreezeBase::recurse_freeze_stub_frame(frame& f, frame& caller) {
-  intptr_t* const stack_frame_top = ContinuationHelper::StubFrame::frame_top(f, 0, 0);
-  const int fsize = f.cb()->frame_size();
-
-  log_develop_trace(continuations)("recurse_freeze_stub_frame %s _size: %d fsize: %d :: " INTPTR_FORMAT " - " INTPTR_FORMAT,
-    f.cb()->name(), _freeze_size, fsize, p2i(stack_frame_top), p2i(stack_frame_top+fsize));
-
-  // recurse_freeze_java_frame and freeze inlined here because we need to use a full RegisterMap for lock ownership
-  NOT_PRODUCT(_frames++;)
-  _freeze_size += fsize;
-
-  RegisterMap map(_cont.thread(), true, false, false);
-  map.set_include_argument_oops(false);
-  ContinuationHelper::update_register_map<ContinuationHelper::StubFrame>(f, &map);
-  f.oop_map()->update_register_map(&f, &map); // we have callee-save registers in this case
-  frame senderf = sender<ContinuationHelper::StubFrame>(f);
-  assert(senderf.unextended_sp() < _bottom_address - 1, "");
-  assert(senderf.is_compiled_frame(), "");
-
-  if (UNLIKELY(senderf.oop_map() == nullptr)) {
-    // native frame
-    return freeze_pinned_native;
-  }
-
-  freeze_result result = recurse_freeze_compiled_frame(senderf, caller, 0, 0); // This might be deoptimized
-  if (UNLIKELY(result > freeze_ok_bottom)) {
-    return result;
-  }
-  assert(result != freeze_ok_bottom, "");
-  assert(!caller.is_interpreted_frame(), "");
-
-  DEBUG_ONLY(before_freeze_java_frame(f, caller, fsize, 0, false);)
-  frame hf = new_heap_frame<ContinuationHelper::StubFrame>(f, caller);
-  intptr_t* heap_frame_top = ContinuationHelper::StubFrame::frame_top(hf, 0, 0);
-  copy_to_chunk(stack_frame_top, heap_frame_top, fsize);
-  DEBUG_ONLY(after_freeze_java_frame(hf, false);)
-
-  caller = hf;
-  return freeze_ok;
-}
-
 NOINLINE void FreezeBase::finish_freeze(const frame& f, const frame& top) {
   stackChunkOop chunk = _cont.tail();
   assert(chunk->to_offset(top.sp()) <= chunk->sp(), "");
@@ -1222,13 +1138,9 @@ NOINLINE void FreezeBase::finish_freeze(const frame& f, const frame& top) {
 }
 
 inline bool FreezeBase::stack_overflow() { // detect stack overflow in recursive native code
-  JavaThread* t = !_preempt ? _thread : JavaThread::current();
-  assert(t == JavaThread::current(), "");
-  if (os::current_stack_pointer() < t->stack_overflow_state()->stack_overflow_limit()) {
-    if (!_preempt) {
-      ContinuationWrapper::SafepointOp so(t, _cont); // could also call _cont.done() instead
-      Exceptions::_throw_msg(t, __FILE__, __LINE__, vmSymbols::java_lang_StackOverflowError(), "Stack overflow while freezing");
-    }
+  if (os::current_stack_pointer() < _thread->stack_overflow_state()->stack_overflow_limit()) {
+    ContinuationWrapper::SafepointOp so(_thread, _cont); // could also call _cont.done() instead
+    Exceptions::_throw_msg(_thread, __FILE__, __LINE__, vmSymbols::java_lang_StackOverflowError(), "Stack overflow while freezing");
     return true;
   }
   return false;
@@ -1242,20 +1154,15 @@ stackChunkOop Freeze<ConfigT>::allocate_chunk(size_t stack_size) {
   size_t size_in_words = klass->instance_size(stack_size);
 
   if (CollectedHeap::stack_chunk_max_size() > 0 && size_in_words >= CollectedHeap::stack_chunk_max_size()) {
-    if (!_preempt) {
-      throw_stack_overflow_on_humongous_chunk();
-    }
+    throw_stack_overflow_on_humongous_chunk();
     return nullptr;
   }
 
-  JavaThread* current = _preempt ? JavaThread::current() : _thread;
-  assert(current == JavaThread::current(), "should be current");
-
-  StackChunkAllocator allocator(klass, size_in_words, stack_size, current);
+  StackChunkAllocator allocator(klass, size_in_words, stack_size, _thread);
   oop fast_oop = allocator.try_allocate_in_existing_tlab();
   oop chunk_oop = fast_oop;
   if (chunk_oop == nullptr) {
-    ContinuationWrapper::SafepointOp so(current, _cont);
+    ContinuationWrapper::SafepointOp so(_thread, _cont);
     assert(_jvmti_event_collector != nullptr, "");
     _jvmti_event_collector->start();  // can safepoint
     chunk_oop = allocator.allocate(); // can safepoint
@@ -1427,7 +1334,6 @@ static inline int freeze_internal(JavaThread* current, intptr_t* const sp) {
   }
 
   log_develop_trace(continuations)("chunk unavailable; transitioning to VM");
-  assert(current == JavaThread::current(), "must be current thread except for preempt");
   JRT_BLOCK
     // delays a possible JvmtiSampledObjectAllocEventCollector in alloc_chunk
     JvmtiSampledObjectAllocEventCollector jsoaec(false);
@@ -1442,7 +1348,7 @@ static inline int freeze_internal(JavaThread* current, intptr_t* const sp) {
   JRT_BLOCK_END
 }
 
-static freeze_result is_pinned0(JavaThread* thread, oop cont_scope, bool safepoint) {
+static freeze_result is_pinned0(JavaThread* thread, oop cont_scope) {
   ContinuationEntry* entry = thread->last_continuation();
   if (entry == nullptr) {
     return freeze_ok;
@@ -1456,21 +1362,7 @@ static freeze_result is_pinned0(JavaThread* thread, oop cont_scope, bool safepoi
   RegisterMap map(thread, true, false, false);
   map.set_include_argument_oops(false);
   frame f = thread->last_frame();
-
-  if (!safepoint) {
-    f = f.sender(&map); // this is the yield frame
-  } else { // safepoint yield
-#if (defined(X86) || defined(AARCH64)) && !defined(ZERO)
-    f.set_fp(f.real_fp()); // Instead of this, maybe in ContinuationWrapper::set_last_frame always use the real_fp?
-#else
-    Unimplemented();
-#endif
-    if (!Interpreter::contains(f.pc())) {
-      assert(ContinuationHelper::Frame::is_stub(f.cb()), "must be");
-      assert(f.oop_map() != nullptr, "must be");
-      f.oop_map()->update_register_map(&f, &map); // we have callee-save registers in this case
-    }
-  }
+  f = f.sender(&map); // this is the yield frame
 
   while (true) {
     if ((f.is_interpreted_frame() && f.interpreter_frame_method()->is_native()) || f.is_native_frame()) {
@@ -1589,7 +1481,7 @@ protected:
   NOINLINE intptr_t* thaw_slow(stackChunkOop chunk, bool return_barrier);
 
 private:
-  void recurse_thaw(const frame& heap_frame, frame& caller, int num_frames, bool top);
+  void recurse_thaw(const frame& heap_frame, frame& caller, int num_frames);
   template<typename FKind> bool recurse_thaw_java_frame(frame& caller, int num_frames);
   void finalize_thaw(frame& entry, int argsize);
 
@@ -1601,8 +1493,7 @@ private:
   void clear_bitmap_bits(intptr_t* start, int range);
 
   NOINLINE void recurse_thaw_interpreted_frame(const frame& hf, frame& caller, int num_frames);
-  void recurse_thaw_compiled_frame(const frame& hf, frame& caller, int num_frames, bool stub_caller);
-  void recurse_thaw_stub_frame(const frame& hf, frame& caller, int num_frames);
+  void recurse_thaw_compiled_frame(const frame& hf, frame& caller, int num_frames);
   void finish_thaw(frame& f);
 
   void push_return_frame(frame& f);
@@ -1852,7 +1743,7 @@ NOINLINE intptr_t* ThawBase::thaw_slow(stackChunkOop chunk, bool return_barrier)
 #endif
 
   frame caller; // the thawed caller on the stack
-  recurse_thaw(heap_frame, caller, num_frames, true);
+  recurse_thaw(heap_frame, caller, num_frames);
   finish_thaw(caller); // caller is now the topmost thawed frame
   _cont.write();
 
@@ -1866,17 +1757,14 @@ NOINLINE intptr_t* ThawBase::thaw_slow(stackChunkOop chunk, bool return_barrier)
   return sp;
 }
 
-void ThawBase::recurse_thaw(const frame& heap_frame, frame& caller, int num_frames, bool top) {
+void ThawBase::recurse_thaw(const frame& heap_frame, frame& caller, int num_frames) {
   log_develop_debug(continuations)("thaw num_frames: %d", num_frames);
   assert(!_cont.is_empty(), "no more frames");
   assert(num_frames > 0, "");
   assert(!heap_frame.is_empty(), "");
 
-  if (top && heap_frame.is_safepoint_blob_frame()) {
-    assert(ContinuationHelper::Frame::is_stub(heap_frame.cb()), "cb: %s", heap_frame.cb()->name());
-    recurse_thaw_stub_frame(heap_frame, caller, num_frames);
-  } else if (!heap_frame.is_interpreted_frame()) {
-    recurse_thaw_compiled_frame(heap_frame, caller, num_frames, false);
+  if (!heap_frame.is_interpreted_frame()) {
+    recurse_thaw_compiled_frame(heap_frame, caller, num_frames);
   } else {
     recurse_thaw_interpreted_frame(heap_frame, caller, num_frames);
   }
@@ -1904,7 +1792,7 @@ bool ThawBase::recurse_thaw_java_frame(frame& caller, int num_frames) {
     finalize_thaw(caller, FKind::interpreted ? 0 : argsize);
     return true; // bottom
   } else { // recurse
-    recurse_thaw(_stream.to_frame(), caller, num_frames - 1, false);
+    recurse_thaw(_stream.to_frame(), caller, num_frames - 1);
     return false;
   }
 }
@@ -2039,11 +1927,10 @@ NOINLINE void ThawBase::recurse_thaw_interpreted_frame(const frame& hf, frame& c
   caller = f;
 }
 
-void ThawBase::recurse_thaw_compiled_frame(const frame& hf, frame& caller, int num_frames, bool stub_caller) {
+void ThawBase::recurse_thaw_compiled_frame(const frame& hf, frame& caller, int num_frames) {
   assert(!hf.is_interpreted_frame(), "");
-  assert(_cont.is_preempted() || !stub_caller, "stub caller not at preemption");
 
-  if (!stub_caller && UNLIKELY(seen_by_gc())) { // recurse_thaw_stub_frame already invoked our barriers with a full regmap
+  if (UNLIKELY(seen_by_gc())) {
     _cont.tail()->do_barriers<stackChunkOopDesc::BarrierType::Store>(_stream, SmallRegisterMap::instance);
   }
 
@@ -2080,12 +1967,7 @@ void ThawBase::recurse_thaw_compiled_frame(const frame& hf, frame& caller, int n
 
   if (f.is_deoptimized_frame()) {
     maybe_set_fastpath(f.sp());
-  } else if (_thread->is_interp_only_mode()
-              || (_cont.is_preempted() && f.cb()->as_compiled_method()->is_marked_for_deoptimization())) {
-    // The caller of the safepoint stub when the continuation is preempted is not at a call instruction, and so
-    // cannot rely on nmethod patching for deopt.
-    assert(_thread->is_interp_only_mode() || stub_caller, "expected a stub-caller");
-
+  } else if (_thread->is_interp_only_mode()) {
     log_develop_trace(continuations)("Deoptimizing thawed frame");
     DEBUG_ONLY(ContinuationHelper::Frame::patch_pc(f, nullptr));
 
@@ -2103,49 +1985,6 @@ void ThawBase::recurse_thaw_compiled_frame(const frame& hf, frame& caller, int n
   }
 
   DEBUG_ONLY(after_thaw_java_frame(f, is_bottom_frame);)
-  caller = f;
-}
-
-void ThawBase::recurse_thaw_stub_frame(const frame& hf, frame& caller, int num_frames) {
-  DEBUG_ONLY(_frames++;)
-
-  {
-    RegisterMap map(nullptr, true, false, false);
-    map.set_include_argument_oops(false);
-    _stream.next(&map);
-    assert(!_stream.is_done(), "");
-    if (UNLIKELY(seen_by_gc())) { // we're now doing this on the stub's caller
-      _cont.tail()->do_barriers<stackChunkOopDesc::BarrierType::Store>(_stream, &map);
-    }
-    assert(!_stream.is_done(), "");
-  }
-
-  recurse_thaw_compiled_frame(_stream.to_frame(), caller, num_frames, true); // this could be deoptimized
-
-  DEBUG_ONLY(before_thaw_java_frame(hf, caller, false, num_frames);)
-
-  assert(ContinuationHelper::Frame::is_stub(hf.cb()), "");
-  assert(caller.sp() == caller.unextended_sp(), "");
-  assert(!caller.is_interpreted_frame(), "");
-
-  int fsize = ContinuationHelper::StubFrame::size(hf);
-
-  frame f = new_stack_frame<ContinuationHelper::StubFrame>(hf, caller, false);
-  intptr_t* stack_frame_top = f.sp();
-  intptr_t* heap_frame_top = hf.sp();
-
-  copy_from_chunk(heap_frame_top - frame::metadata_words, stack_frame_top - frame::metadata_words,
-                  fsize + frame::metadata_words);
-
-  { // can only fix caller once this frame is thawed (due to callee saved regs)
-    RegisterMap map(nullptr, true, false, false); // map.clear();
-    map.set_include_argument_oops(false);
-    f.oop_map()->update_register_map(&f, &map);
-    ContinuationHelper::update_register_map_with_callee(caller, &map);
-    _cont.tail()->fix_thawed_frame(caller, &map);
-  }
-
-  DEBUG_ONLY(after_thaw_java_frame(f, false);)
   caller = f;
 }
 

@@ -371,10 +371,8 @@ address TemplateInterpreterGenerator::generate_safept_entry_for(
 
   __ push(state);
   NOT_LP64(__ get_thread(rthread);)
-  __ push_cont_fastpath(rthread);
   __ call_VM(noreg, runtime_entry);
   NOT_LP64(__ get_thread(rthread);)
-  __ pop_cont_fastpath(rthread);
 
   __ dispatch_via(vtos, Interpreter::_normal_table.table_for(vtos));
   return entry;
