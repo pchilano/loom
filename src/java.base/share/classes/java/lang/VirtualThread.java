@@ -131,6 +131,8 @@ final class VirtualThread extends BaseVirtualThread {
     // termination object when joining, created lazily if needed
     private volatile CountDownLatch termination;
 
+    private boolean preemptionDisabled;
+
     /**
      * Returns the continuation scope used for virtual threads.
      */
@@ -212,12 +214,20 @@ final class VirtualThread extends BaseVirtualThread {
         // notify JVMTI before mount
         if (notifyJvmtiEvents) notifyJvmtiMountBegin(firstRun);
 
+        if (cont.isPreempted()) {
+            mount();
+        }
+
         try {
             cont.run();
         } finally {
             if (cont.isDone()) {
                 afterTerminate(/*executed*/ true);
             } else {
+                if (cont.isPreempted()) {
+                    setState(YIELDING);
+                    unmount();
+                }
                 afterYield();
             }
         }
@@ -389,6 +399,7 @@ final class VirtualThread extends BaseVirtualThread {
         if (notifyJvmti) {
             notifyJvmtiHideFrames(true);
         }
+        setPreemptionDisabled(true);
         Thread carrier = this.carrierThread;
         assert Thread.currentThread() == this
                 && carrier == Thread.currentCarrierThread();
@@ -406,6 +417,7 @@ final class VirtualThread extends BaseVirtualThread {
         Thread carrier = vthread.carrierThread;
         assert carrier == Thread.currentCarrierThread();
         carrier.setCurrentThread(vthread);
+        vthread.setPreemptionDisabled(false);
         if (notifyJvmti) {
             notifyJvmtiHideFrames(false);
         }
@@ -590,8 +602,9 @@ final class VirtualThread extends BaseVirtualThread {
             long startTime = System.nanoTime();
 
             boolean yielded;
-            Future<?> unparker = scheduleUnpark(this::unpark, nanos);
             setState(PARKING);
+            Future<?> unparker = scheduleUnpark(this::unpark, nanos);
+
             try {
                 yielded = yieldContinuation();
             } finally {
@@ -723,6 +736,30 @@ final class VirtualThread extends BaseVirtualThread {
                 setState(RUNNING);
             }
         }
+    }
+
+    /**
+     * Tries to forcefully preempt this virtual thread.
+     *
+     * @return the result of the preempt attempt.
+     * @throws UnsupportedOperationException if this virtual thread does not support preemption.
+     */
+    @Override
+    public boolean tryPreempt() {
+        Thread carrier = this.carrierThread;
+        if (state() == RUNNING && carrier != null) {
+            Continuation.PreemptStatus res = cont.tryPreempt(carrier);
+            return res == Continuation.PreemptStatus.SUCCESS;
+        }
+        return false;
+    }
+
+    /**
+     * Tests whether this virtual thread was unmounted by forceful preemption (a successful tryPreempt)
+     * @return whether this virtual thread was unmounted by forceful preemption.
+     */
+    public boolean isPreempted() {
+        return cont.isPreempted();
     }
 
     /**
@@ -1048,6 +1085,11 @@ final class VirtualThread extends BaseVirtualThread {
     private void setCarrierThread(Thread carrier) {
         // U.putReferenceRelease(this, CARRIER_THREAD, carrier);
         this.carrierThread = carrier;
+    }
+
+    private void setPreemptionDisabled(boolean newValue) {
+        assert this.preemptionDisabled != newValue;
+        this.preemptionDisabled = newValue;
     }
 
     // -- JVM TI support --

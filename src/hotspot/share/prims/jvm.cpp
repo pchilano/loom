@@ -4023,6 +4023,13 @@ JVM_ENTRY(void, JVM_VirtualThreadUnmountEnd(JNIEnv* env, jobject vthread, jboole
   assert(thread->is_in_VTMS_transition(), "sanity check");
   assert(!thread->is_in_tmp_VTMS_transition(), "sanity check");
   JvmtiVTMSTransitionDisabler::finish_VTMS_transition(vthread, /* is_mount */ false);
+
+  if (JvmtiExport::should_post_vthread_unmount()) {
+    if (java_lang_VirtualThread::is_preempted(JNIHandles::resolve(vthread))) {
+      // For preemption case post the unmount event here.
+      JvmtiExport::post_vthread_unmount(vthread);
+    }
+  }
 #else
   fatal("Should only be called with JVMTI enabled");
 #endif

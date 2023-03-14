@@ -223,8 +223,11 @@ template<typename ConfigT>
 static JRT_LEAF(intptr_t*, thaw(JavaThread* thread, int kind))
   // TODO: JRT_LEAF and NoHandleMark is problematic for JFR events.
   // vFrameStreamCommon allocates Handles in RegisterMap for continuations.
+  // Also the preemption case with JVMTI events enabled might safepoint so
+  // undo the NoSafepointVerifier here and rely on handling by ContinuationWrapper.
   // JRT_ENTRY instead?
   ResetNoHandleMark rnhm;
+  debug_only(PauseNoSafepointVerifier pnsv(&__nsv);)
 
   return ConfigT::thaw(thread, (Continuation::thaw_kind)kind);
 JRT_END
@@ -273,6 +276,7 @@ static oop get_continuation(JavaThread* thread) {
   assert(thread->threadObj() != nullptr, "");
   return java_lang_Thread::continuation(thread->threadObj());
 }
+#endif // ASSERT
 
 inline void clear_anchor(JavaThread* thread) {
   thread->frame_anchor()->clear();
@@ -290,7 +294,6 @@ static void set_anchor(JavaThread* thread, intptr_t* sp) {
   assert(thread->has_last_Java_frame(), "");
   assert(thread->last_frame().cb() != nullptr, "");
 }
-#endif // ASSERT
 
 static void set_anchor_to_entry(JavaThread* thread, ContinuationEntry* entry) {
   JavaFrameAnchor* anchor = thread->frame_anchor();
@@ -947,7 +950,6 @@ freeze_result FreezeBase::finalize_freeze(const frame& callee, frame& caller, in
   if (_preempt && _thread->return_oop() != nullptr) {
     // First restore the oop in case there was a safepoint. Then mark the chunk as
     // having an oop in the freezed stub.
-    log_trace(continuations, preempt)("Preempting with return oop on stub");
     frame stubframe = _thread->last_frame();
     oop* return_oop_addr = frame::saved_oop_result_address(stubframe);
     *return_oop_addr = _thread->return_oop();
@@ -1069,8 +1071,9 @@ NOINLINE freeze_result FreezeBase::recurse_freeze_interpreted_frame(frame& f, fr
 
   log_develop_trace(continuations)("recurse_freeze_interpreted_frame %s _size: %d fsize: %d argsize: %d",
     frame_method->name_and_sig_as_C_string(), _freeze_size, fsize, argsize);
-  // we'd rather not yield inside methods annotated with @JvmtiMountTransition
-  assert(!ContinuationHelper::Frame::frame_method(f)->jvmti_mount_transition(), "");
+  // we'd rather not yield inside methods annotated with @JvmtiMountTransition. In the preempt case
+  // we already checked it is safe to do so in Continuation::is_safe_vthread_to_preempt().
+  assert(!ContinuationHelper::Frame::frame_method(f)->jvmti_mount_transition() || _preempt, "");
 
   freeze_result result = recurse_freeze_java_frame<ContinuationHelper::InterpretedFrame>(f, caller, fsize, argsize);
   if (UNLIKELY(result > freeze_ok_bottom)) {
@@ -1124,8 +1127,9 @@ freeze_result FreezeBase::recurse_freeze_compiled_frame(frame& f, frame& caller,
                              ContinuationHelper::Frame::frame_method(f) != nullptr ?
                              ContinuationHelper::Frame::frame_method(f)->name_and_sig_as_C_string() : "",
                              _freeze_size, fsize, argsize);
-  // we'd rather not yield inside methods annotated with @JvmtiMountTransition
-  assert(!ContinuationHelper::Frame::frame_method(f)->jvmti_mount_transition(), "");
+  // we'd rather not yield inside methods annotated with @JvmtiMountTransition. In the preempt case
+  // we already checked it is safe to do so in Continuation::is_safe_vthread_to_preempt().
+  assert(!ContinuationHelper::Frame::frame_method(f)->jvmti_mount_transition() || _preempt, "");
 
   freeze_result result = recurse_freeze_java_frame<ContinuationHelper::CompiledFrame>(f, caller, fsize, argsize);
   if (UNLIKELY(result > freeze_ok_bottom)) {
@@ -1456,6 +1460,54 @@ static void jvmti_yield_cleanup(JavaThread* thread, ContinuationWrapper& cont) {
   }
   invalidate_jvmti_stack(thread);
 }
+
+static void jvmti_mount_end(JavaThread* current, ContinuationWrapper& cont, frame top, bool has_oop_on_stub) {
+  assert(java_lang_VirtualThread::notify_jvmti_events(), "must be");
+  assert(current->vthread() != nullptr, "must be");
+
+  HandleMarkCleaner hm(current);
+  Handle vth(current, current->vthread());
+
+  // All the conditions that we check for in Continuation::try_preempt() will check out if
+  // a safepoint happens below, since this thread will look like as it has polled for
+  // a safepoint coming from Java. We don't want to preempt in this case.
+  DisablePreemption dp(vth);
+  ContinuationWrapper::SafepointOp so(current, cont);
+
+  // Since we might safepoint set the anchor so that the stack can we walked. Also
+  // protect the return oop if there is one as we do in handle_polling_page_exception().
+  set_anchor(current, top.sp());
+  oop* return_oop_addr;
+  if (has_oop_on_stub) {
+    return_oop_addr = frame::saved_oop_result_address(top);
+    current->set_return_oop(*return_oop_addr);
+  }
+
+  JRT_BLOCK
+    current->rebind_to_jvmti_thread_state_of(vth());
+    {
+      MutexLocker mu(JvmtiThreadState_lock);
+      JvmtiThreadState* state = current->jvmti_thread_state();
+      if (state != NULL && state->is_pending_interp_only_mode()) {
+        JvmtiEventController::enter_interp_only_mode();
+      }
+    }
+    assert(current->is_in_VTMS_transition(), "sanity check");
+    assert(!current->is_in_tmp_VTMS_transition(), "sanity check");
+    JvmtiVTMSTransitionDisabler::finish_VTMS_transition(current, current, vth(), /* is_mount */ true);
+
+    if (JvmtiExport::should_post_vthread_mount()) {
+      JvmtiExport::post_vthread_mount((jthread)vth.raw_value());
+    }
+  JRT_BLOCK_END
+
+  clear_anchor(current);
+  if (has_oop_on_stub) {
+    // Restore return oop.
+    *return_oop_addr = current->return_oop();
+    current->set_return_oop(nullptr);
+  }
+}
 #endif // INCLUDE_JVMTI
 
 #ifdef ASSERT
@@ -1497,7 +1549,6 @@ static inline int freeze_epilog(ContinuationWrapper& cont) {
   assert(!cont.is_empty(), "");
 
   log_develop_debug(continuations)("=== End of freeze cont ### #" INTPTR_FORMAT, cont.hash());
-
   return 0;
 }
 
@@ -1721,6 +1772,7 @@ protected:
   bool _barriers;
   intptr_t* _top_unextended_sp_before_thaw;
   int _align_size;
+  stackChunkOop _saved_chunk;
   DEBUG_ONLY(intptr_t* _top_stack_address);
 
   StackChunkFrameStream<ChunkFrames::Mixed> _stream;
@@ -2030,17 +2082,25 @@ NOINLINE intptr_t* ThawBase::thaw_slow(stackChunkOop chunk, bool return_barrier)
 
   assert(!_cont.is_preempted() || !return_barrier, "if preempted kind should be thaw_top");
   if (!return_barrier && _cont.is_preempted()) {
-    _cont.set_preempted(false);
     frame top(sp);
     assert(top.pc() == *(address*)(sp - frame::sender_sp_ret_address_offset()), "");
-    if (Interpreter::contains(top.pc())) {
+    bool top_is_interpreted = Interpreter::contains(top.pc());
+
+    // finish_thaw() could have changed _tail so use the chunk value saved during recurse_thaw()
+    bool has_oop_on_stub = top_is_interpreted ? false : _saved_chunk->has_oop_on_stub();
+
+    if (has_oop_on_stub && _saved_chunk == _cont.tail()) {
+      _saved_chunk->set_has_oop_on_stub(false);
+    }
+    _cont.set_preempted(false);
+
+    JVMTI_ONLY(if (_thread->is_in_VTMS_transition()) jvmti_mount_end(_thread, _cont, top, has_oop_on_stub);)
+
+    if (top_is_interpreted) {
       sp = push_preempt_rerun_adapter(top, true /* is_interpreted_frame */);
     } else {
       assert(top.is_safepoint_blob_frame(), "");
       sp = push_preempt_rerun_adapter(top, false /* is_interpreted_frame */);
-      if (_cont.tail() != nullptr && _cont.tail()->has_oop_on_stub()) {
-        _cont.tail()->set_has_oop_on_stub(false);
-      }
     }
   }
 
@@ -2356,6 +2416,11 @@ void ThawBase::recurse_thaw_stub_frame(const frame& hf, frame& caller, int num_f
   // we need to adjust the current thread saved in the safepoint blob before restoring registers.
   JavaThread** thread_addr = frame::saved_thread_address(f);
   *thread_addr = _thread;
+
+  // Save the chunk now because finish_thaw() might change the tail if this chunk becomes empty.
+  // We need the chunk to read and possibly clear the FLAG_HAS_OOP_ON_STUB during the last
+  // part of thaw. See thaw_slow().
+  _saved_chunk = _cont.tail();
 
   if (!is_bottom_frame) {
     // can only fix caller once this frame is thawed (due to callee saved regs)
