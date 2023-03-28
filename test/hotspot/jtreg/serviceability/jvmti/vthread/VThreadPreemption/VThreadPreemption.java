@@ -227,6 +227,7 @@ public class VThreadPreemption {
 
     private void foo2(long runTimeNanos) {
         markStart(2);
+        Thread.toggleGlobalLogging();
         long startTime = System.nanoTime();
         while (System.nanoTime() - startTime < runTimeNanos) {
             String r = "";
@@ -243,6 +244,7 @@ public class VThreadPreemption {
             double result = Double.parseDouble(r)+1;
         }
         markFinish();
+        Thread.toggleGlobalLogging();
     }
 
     private String bar2(long l1, int i1, int i2, int i3, int i4, int i5, int i6,

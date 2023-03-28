@@ -222,6 +222,7 @@ static bool is_safe_to_preempt(JavaThread* target, oop continuation, bool is_vth
 }
 
 typedef int (*FreezeContFnT)(JavaThread*, intptr_t*);
+static uint64_t fail_counter = 0;
 
 int Continuation::try_preempt(JavaThread* target, Handle continuation) {
   ContinuationEntry* ce = target->last_continuation();
@@ -253,6 +254,12 @@ int Continuation::try_preempt(JavaThread* target, Handle continuation) {
   JVMTI_ONLY(jubm.set_preempt_result(res);)
   if (res != freeze_ok) {
     target->set_preempting(false);
+    fail_counter++;
+    if (fail_counter % 500 == 0) {
+      //printf("preemption failed at time: " INT64_FORMAT, (int64_t)os::javaTimeNanos());
+    }
+  } else {
+    //printf("preemption succeded at time " INT64_FORMAT, (int64_t)os::javaTimeNanos());
   }
   return res;
 }

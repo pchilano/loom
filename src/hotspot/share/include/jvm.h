@@ -278,6 +278,9 @@ JVM_Yield(JNIEnv *env, jclass threadClass);
 JNIEXPORT void JNICALL
 JVM_Sleep(JNIEnv *env, jclass threadClass, jlong millis);
 
+JNIEXPORT void JNICALL
+JVM_ToggleGlobalLogging(JNIEnv *env, jclass threadClass);
+
 JNIEXPORT jobject JNICALL
 JVM_CurrentCarrierThread(JNIEnv *env, jclass threadClass);
 

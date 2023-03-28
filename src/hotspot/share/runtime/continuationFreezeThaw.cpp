@@ -2030,6 +2030,8 @@ inline bool ThawBase::seen_by_gc() {
   return _barriers || _cont.tail()->is_gc_mode();
 }
 
+extern bool _global_logging;
+
 NOINLINE intptr_t* ThawBase::thaw_slow(stackChunkOop chunk, bool return_barrier) {
   LogTarget(Trace, continuations) lt;
   if (lt.develop_is_enabled()) {
@@ -2098,9 +2100,15 @@ NOINLINE intptr_t* ThawBase::thaw_slow(stackChunkOop chunk, bool return_barrier)
 
     if (top_is_interpreted) {
       sp = push_preempt_rerun_adapter(top, true /* is_interpreted_frame */);
+      if (_global_logging) {
+        printf("thaw with interpreted frame on top at time: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+      }
     } else {
       assert(top.is_safepoint_blob_frame(), "");
       sp = push_preempt_rerun_adapter(top, false /* is_interpreted_frame */);
+      if (_global_logging) {
+        printf("thaw with safepoint blob frame on top at time: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+      }
     }
   }
 

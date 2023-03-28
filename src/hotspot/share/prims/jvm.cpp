@@ -3055,6 +3055,12 @@ JVM_LEAF(void, JVM_Yield(JNIEnv *env, jclass threadClass))
   os::naked_yield();
 JVM_END
 
+bool _global_logging = false;
+
+JVM_LEAF(void, JVM_ToggleGlobalLogging(JNIEnv* env, jclass threadClass))
+  _global_logging = !_global_logging;
+JVM_END
+
 JVM_ENTRY(void, JVM_Sleep(JNIEnv* env, jclass threadClass, jlong millis))
   if (millis < 0) {
     THROW_MSG(vmSymbols::java_lang_IllegalArgumentException(), "timeout value is negative");
@@ -3925,7 +3931,13 @@ JVM_ENTRY(void, JVM_VirtualThreadMountBegin(JNIEnv* env, jobject vthread, jboole
   }
   assert(!thread->is_in_tmp_VTMS_transition(), "sanity check");
   assert(!thread->is_in_VTMS_transition(), "sanity check");
+  if (_global_logging) {
+    printf("Calling mount begin at time: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+  }
   JvmtiVTMSTransitionDisabler::start_VTMS_transition(vthread, /* is_mount */ true);
+  if (_global_logging) {
+    printf("Calling mount end at time:: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+  }
 #else
   fatal("Should only be called with JVMTI enabled");
 #endif
@@ -4020,6 +4032,9 @@ JVM_ENTRY(void, JVM_VirtualThreadUnmountEnd(JNIEnv* env, jobject vthread, jboole
     assert(!JvmtiExport::can_support_virtual_threads(), "sanity check");
     return;
   }
+  if (_global_logging) {
+    printf("Calling unmount begin at time:: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+  }
   assert(thread->is_in_VTMS_transition(), "sanity check");
   assert(!thread->is_in_tmp_VTMS_transition(), "sanity check");
   JvmtiVTMSTransitionDisabler::finish_VTMS_transition(vthread, /* is_mount */ false);
@@ -4033,6 +4048,9 @@ JVM_ENTRY(void, JVM_VirtualThreadUnmountEnd(JNIEnv* env, jobject vthread, jboole
 #else
   fatal("Should only be called with JVMTI enabled");
 #endif
+  if (_global_logging) {
+    printf("Calling unmount end at time:: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+  }
 JVM_END
 
 JVM_ENTRY(void, JVM_VirtualThreadHideFrames(JNIEnv* env, jobject vthread, jboolean hide))

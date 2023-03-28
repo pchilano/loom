@@ -488,6 +488,11 @@ public class Thread implements Runnable {
     private static native void sleep0(long millis) throws InterruptedException;
 
     /**
+     * Dummy logging API
+     */
+    public static native void toggleGlobalLogging();
+
+    /**
      * Causes the currently executing thread to sleep (temporarily cease
      * execution) for the specified number of milliseconds plus the specified
      * number of nanoseconds, subject to the precision and accuracy of system
