@@ -691,13 +691,16 @@ void HandshakeState::wait_for_op(HandshakeOperation* op) {
   assert(op->can_allocate_objects(), "no notification for this operation");
   assert(_handshakee->thread_state() == _thread_in_vm, "invalid state");
   assert(_lock.owned_by_self(), "Lock must be held");
+  ResourceMark rm;
+  const char* threadname = _handshakee->name();
 
   _handshakee->set_thread_state(_thread_blocked);
   // When recheckig condition, original op could have been processed and removed but new
   // one with same address could have been pushed, so check type too.
   while (operation_pending(op) && op->can_allocate_objects()) {
-    log_trace(handshake)("JavaThread:" INTPTR_FORMAT " waiting for operation " INTPTR_FORMAT, p2i(_handshakee), p2i(op));
+    log_trace(handshake)("" INTPTR_FORMAT " waiting for operation " INTPTR_FORMAT, p2i(_handshakee), p2i(op));
     _lock.wait_without_safepoint_check();
+    log_trace(continuations, constantpool)("JavaThread %s woke up from wait_for_op() at time: " INT64_FORMAT, threadname, (int64_t)os::javaTimeNanos());
   }
   _handshakee->set_thread_state(_thread_in_vm);
 }

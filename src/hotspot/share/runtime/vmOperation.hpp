@@ -105,6 +105,7 @@
   template(GTestExecuteAtSafepoint)               \
   template(GTestStopSafepoint)                    \
   template(JFROldObject)                          \
+  template(PrintStacks)                           \
   template(JvmtiPostObjectFree)
 
 class Thread;

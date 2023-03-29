@@ -88,6 +88,7 @@
 #include "runtime/synchronizer.hpp"
 #include "runtime/threadIdentifier.hpp"
 #include "runtime/threadSMR.hpp"
+#include "runtime/vframe_hp.hpp"
 #include "runtime/vframe.inline.hpp"
 #include "runtime/vmOperations.hpp"
 #include "runtime/vm_version.hpp"
@@ -3055,9 +3056,85 @@ JVM_LEAF(void, JVM_Yield(JNIEnv *env, jclass threadClass))
   os::naked_yield();
 JVM_END
 
-bool _global_logging = false;
 
-JVM_LEAF(void, JVM_ToggleGlobalLogging(JNIEnv* env, jclass threadClass))
+bool _global_logging = false;
+uint64_t _last_write_time = 0;
+const uint64_t NANOS_PER_SECOND = 1000000000;
+static char buf[O_BUFLEN];
+
+class PrintNativeStack : public SuspendedThreadTask {
+  outputStream* _st;
+ public:
+  PrintNativeStack(JavaThread* thread, outputStream* st) : SuspendedThreadTask(thread), _st(st) {}
+  void do_task(const SuspendedThreadTaskContext& context) {
+    os::platform_print_native_stack(_st, context.ucontext(), buf, sizeof(buf));
+  }
+};
+
+class VM_PrintStacks : public VM_Operation {
+public:
+  VMOp_Type type() const { return VMOp_PrintStacks; }
+  VM_PrintStacks() {}
+  void doit() {
+    if (os::javaTimeNanos() - _last_write_time > 10 * NANOS_PER_SECOND) {
+      Log(continuations, constantpool) log;
+      LogStream info_stream(log.trace());
+      ResourceMark rm;
+
+      for (JavaThreadIteratorWithHandle jtiwh; JavaThread *cur = jtiwh.next(); ) {
+        if (strstr(cur->name(), "ForkJoinPool") != nullptr || strstr(cur->name(), "Thread-") != nullptr) {
+          info_stream.print_cr("Printing stack for thread: %s", cur->name());
+          cur->print_stack_on(&info_stream);
+
+          if (cur->is_vthread_mounted()) {
+            info_stream.print_cr("Printing stack for vthread: ");
+            cur->print_vthread_stack_on(&info_stream);
+
+            RegisterMap reg_map(cur,
+                      RegisterMap::UpdateMap::include,
+                      RegisterMap::ProcessFrames::include,
+                      RegisterMap::WalkContinuation::include);
+            vframe* start_vf = cur->last_java_vframe(&reg_map);
+            if (start_vf->is_compiled_frame()) {
+              info_stream.print_cr("top frame is compiled: pc=" INTPTR_FORMAT, p2i(start_vf->fr().pc()));
+              nmethod* nm = (nmethod*)compiledVFrame::cast(start_vf)->code();
+              address nm_entry_pc = nm->entry_point();
+              nm->print_on(&info_stream, "hex dump of nmethod:");
+              os::print_hex_dump(&info_stream, nm_entry_pc, nm->exception_begin(), 1);
+            }
+          }
+
+          // print thread's native stack
+          PrintNativeStack pns(cur, &info_stream);
+          info_stream.print_cr("Printing native stack for thread: %s", cur->name());
+          pns.run();
+        }
+      }
+    }
+  }
+};
+
+class StackSamplerTask : public PeriodicTask {
+  public:
+    StackSamplerTask(int interval_time) : PeriodicTask(interval_time) {}
+    void task() {
+      VM_PrintStacks op;
+      VMThread::execute(&op);
+    }
+};
+
+StackSamplerTask* pt = nullptr;
+
+JVM_ENTRY(void, JVM_ToggleGlobalLogging(JNIEnv* env, jclass threadClass))
+  if (_global_logging) {
+    pt->disenroll();
+    delete pt;
+  } else {
+    pt = new StackSamplerTask(30*1000);
+    //pt = new StackSamplerTask(2*1000);
+    _last_write_time = os::javaTimeNanos();
+    pt->enroll();
+  }
   _global_logging = !_global_logging;
 JVM_END
 
@@ -3932,11 +4009,11 @@ JVM_ENTRY(void, JVM_VirtualThreadMountBegin(JNIEnv* env, jobject vthread, jboole
   assert(!thread->is_in_tmp_VTMS_transition(), "sanity check");
   assert(!thread->is_in_VTMS_transition(), "sanity check");
   if (_global_logging) {
-    printf("Calling mount begin at time: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+    //log_trace(continuations, constantpool)("Calling mount begin at time: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
   }
   JvmtiVTMSTransitionDisabler::start_VTMS_transition(vthread, /* is_mount */ true);
   if (_global_logging) {
-    printf("Calling mount end at time:: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+    //log_trace(continuations, constantpool)("Called mountbegin at time:: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
   }
 #else
   fatal("Should only be called with JVMTI enabled");
@@ -3984,6 +4061,9 @@ JVM_ENTRY(void, JVM_VirtualThreadMountEnd(JNIEnv* env, jobject vthread, jboolean
 #else
   fatal("Should only be called with JVMTI enabled");
 #endif
+  if (_global_logging) {
+    //log_trace(continuations, constantpool)("Called mountend at time:: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+  }
 JVM_END
 
 JVM_ENTRY(void, JVM_VirtualThreadUnmountBegin(JNIEnv* env, jobject vthread, jboolean last_unmount))
@@ -4024,6 +4104,9 @@ JVM_ENTRY(void, JVM_VirtualThreadUnmountBegin(JNIEnv* env, jobject vthread, jboo
 #else
   fatal("Should only be called with JVMTI enabled");
 #endif
+  if (_global_logging) {
+    //log_trace(continuations, constantpool)("Called unmountbegin at time:: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+  }
 JVM_END
 
 JVM_ENTRY(void, JVM_VirtualThreadUnmountEnd(JNIEnv* env, jobject vthread, jboolean last_unmount))
@@ -4031,9 +4114,6 @@ JVM_ENTRY(void, JVM_VirtualThreadUnmountEnd(JNIEnv* env, jobject vthread, jboole
   if (!DoJVMTIVirtualThreadTransitions) {
     assert(!JvmtiExport::can_support_virtual_threads(), "sanity check");
     return;
-  }
-  if (_global_logging) {
-    printf("Calling unmount begin at time:: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
   }
   assert(thread->is_in_VTMS_transition(), "sanity check");
   assert(!thread->is_in_tmp_VTMS_transition(), "sanity check");
@@ -4049,7 +4129,7 @@ JVM_ENTRY(void, JVM_VirtualThreadUnmountEnd(JNIEnv* env, jobject vthread, jboole
   fatal("Should only be called with JVMTI enabled");
 #endif
   if (_global_logging) {
-    printf("Calling unmount end at time:: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+    log_trace(continuations, constantpool)("Called unmount end at time:: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
   }
 JVM_END
 

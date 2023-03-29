@@ -64,7 +64,7 @@
 * @enablePreview
 *
 * @run main/othervm/native -agentlib:VThreadPreemption -XX:+IgnoreUnrecognizedVMOptions -XX:-VerifyContinuations -XX:+DeoptimizeALot VThreadPreemption
-* @run main/othervm/native -agentlib:VThreadPreemption -XX:+IgnoreUnrecognizedVMOptions -XX:-VerifyContinuations -XX:+FullGCALot -XX:FullGCALotInterval=1000 VThreadPreemption
+* @run main/othervm/native -agentlib:VThreadPreemption -XX:+IgnoreUnrecognizedVMOptions -XX:-VerifyContinuations -XX:+AbortVMOnSafepointTimeout -XX:SafepointTimeoutDelay=180000 -Xlog:continuations+constantpool=trace:mytracelog.log -XX:+FullGCALot -XX:FullGCALotInterval=1000 VThreadPreemption
 */
 
 /**
@@ -227,7 +227,6 @@ public class VThreadPreemption {
 
     private void foo2(long runTimeNanos) {
         markStart(2);
-        Thread.toggleGlobalLogging();
         long startTime = System.nanoTime();
         while (System.nanoTime() - startTime < runTimeNanos) {
             String r = "";
@@ -244,7 +243,6 @@ public class VThreadPreemption {
             double result = Double.parseDouble(r)+1;
         }
         markFinish();
-        Thread.toggleGlobalLogging();
     }
 
     private String bar2(long l1, int i1, int i2, int i3, int i4, int i5, int i6,
@@ -333,13 +331,16 @@ public class VThreadPreemption {
     }
 
     void runTest() throws Exception {
+        Thread.toggleGlobalLogging();
         test1();
         test2();
+        Thread.toggleGlobalLogging();
         test3();
         test4();
     }
 
     public static void main(String[] args) throws Exception {
+        System.out.println("Test started at time: " + System.nanoTime());
         try {
             System.loadLibrary(agentLib);
         } catch (UnsatisfiedLinkError ex) {
