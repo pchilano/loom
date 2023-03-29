@@ -108,8 +108,10 @@ void InterfaceSupport::gc_alot() {
         warning("FullGCALot: Unable to release more dummies at bottom of heap");
       }
       HandleMark hm(thread);
+      printf("Starting Full GC at ttime: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
       Universe::heap()->collect(GCCause::_full_gc_alot);
       unsigned int invocations = Universe::heap()->total_full_collections();
+      printf("Ended Full GC at ttime: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
       // Compute new interval
       if (FullGCALotInterval > 1) {
         _fullgc_alot_counter = 1+(unsigned int)((double)FullGCALotInterval*os::random()/(max_jint+1.0));

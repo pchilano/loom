@@ -35,7 +35,7 @@ on:
       platforms:
         description: 'Platform(s) to execute on (comma separated, e.g. "linux-x64, macos, aarch64")'
         required: true
-        default: 'linux-x64, linux-x86, linux-x64-variants, linux-cross-compile, macos-x64, macos-aarch64, windows-x64, windows-aarch64, docs'
+        default: 'windows-x64, docs'
       configure-arguments:
         description: 'Additional configure arguments'
         required: false
@@ -57,14 +57,7 @@ jobs:
     name: 'Select platforms'
     runs-on: ubuntu-22.04
     outputs:
-      linux-x64: ${{ steps.include.outputs.linux-x64 }}
-      linux-x86: ${{ steps.include.outputs.linux-x86 }}
-      linux-x64-variants: ${{ steps.include.outputs.linux-x64-variants }}
-      linux-cross-compile: ${{ steps.include.outputs.linux-cross-compile }}
-      macos-x64: ${{ steps.include.outputs.macos-x64 }}
-      macos-aarch64: ${{ steps.include.outputs.macos-aarch64 }}
       windows-x64: ${{ steps.include.outputs.windows-x64 }}
-      windows-aarch64: ${{ steps.include.outputs.windows-aarch64 }}
       docs: ${{ steps.include.outputs.docs }}
 
     steps:
