@@ -1433,6 +1433,9 @@ void FreezeBase::throw_stack_overflow_on_humongous_chunk() {
   Exceptions::_throw_msg(_thread, __FILE__, __LINE__, vmSymbols::java_lang_StackOverflowError(), "Humongous stack chunk");
 }
 
+extern bool _global_logging;
+extern uint64_t _last_write_time;
+
 #if INCLUDE_JVMTI
 static int num_java_frames(ContinuationWrapper& cont) {
   ResourceMark rm; // used for scope traversal in num_java_frames(CompiledMethod*, address)
@@ -1483,6 +1486,10 @@ static void jvmti_mount_end(JavaThread* current, ContinuationWrapper& cont, fram
     current->set_return_oop(*return_oop_addr);
   }
 
+  if (_global_logging) {
+    log_trace(continuations, constantpool)("before posting mount even in thaw at time: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+  }
+
   JRT_BLOCK
     current->rebind_to_jvmti_thread_state_of(vth());
     {
@@ -1492,12 +1499,21 @@ static void jvmti_mount_end(JavaThread* current, ContinuationWrapper& cont, fram
         JvmtiEventController::enter_interp_only_mode();
       }
     }
+    if (_global_logging) {
+      //printf("passed grabbing JvmtiThreadState_lock at time: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+    }
     assert(current->is_in_VTMS_transition(), "sanity check");
     assert(!current->is_in_tmp_VTMS_transition(), "sanity check");
     JvmtiVTMSTransitionDisabler::finish_VTMS_transition(current, current, vth(), /* is_mount */ true);
+    if (_global_logging) {
+      //log_trace(continuations, constantpool)("passed finish_VTMS_transition at time: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+    }
 
     if (JvmtiExport::should_post_vthread_mount()) {
       JvmtiExport::post_vthread_mount((jthread)vth.raw_value());
+    }
+    if (_global_logging) {
+      //log_trace(continuations, constantpool)("passed post_vthread_mount at time: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
     }
   JRT_BLOCK_END
 
@@ -1506,6 +1522,9 @@ static void jvmti_mount_end(JavaThread* current, ContinuationWrapper& cont, fram
     // Restore return oop.
     *return_oop_addr = current->return_oop();
     current->set_return_oop(nullptr);
+  }
+  if (_global_logging) {
+    //log_trace(continuations, constantpool)("exiting jvmti_mount_end at time: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
   }
 }
 #endif // INCLUDE_JVMTI
@@ -2030,8 +2049,6 @@ inline bool ThawBase::seen_by_gc() {
   return _barriers || _cont.tail()->is_gc_mode();
 }
 
-extern bool _global_logging;
-
 NOINLINE intptr_t* ThawBase::thaw_slow(stackChunkOop chunk, bool return_barrier) {
   LogTarget(Trace, continuations) lt;
   if (lt.develop_is_enabled()) {
@@ -2101,13 +2118,15 @@ NOINLINE intptr_t* ThawBase::thaw_slow(stackChunkOop chunk, bool return_barrier)
     if (top_is_interpreted) {
       sp = push_preempt_rerun_adapter(top, true /* is_interpreted_frame */);
       if (_global_logging) {
-        printf("thaw with interpreted frame on top at time: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+        log_trace(continuations, constantpool)("thaw with interpreted frame on top at time: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+        _last_write_time = os::javaTimeNanos();
       }
     } else {
       assert(top.is_safepoint_blob_frame(), "");
       sp = push_preempt_rerun_adapter(top, false /* is_interpreted_frame */);
       if (_global_logging) {
-        printf("thaw with safepoint blob frame on top at time: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+        log_trace(continuations, constantpool)("thaw with safepoint blob frame on top at time: " INT64_FORMAT "\n", (int64_t)os::javaTimeNanos());
+        _last_write_time = os::javaTimeNanos();
       }
     }
   }

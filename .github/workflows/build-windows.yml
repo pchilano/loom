@@ -41,7 +41,7 @@ on:
       debug-levels:
         required: false
         type: string
-        default: '[ "debug", "release" ]'
+        default: '[ "debug" ]'
       msvc-toolset-version:
         required: true
         type: string
