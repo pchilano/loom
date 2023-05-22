@@ -2095,10 +2095,14 @@ NOINLINE intptr_t* ThawBase::thaw_slow(stackChunkOop chunk, bool return_barrier)
     _cont.set_preempted(false);
 
 #if INCLUDE_JVMTI
-    if (JvmtiVTMSTransitionDisabler::VTMS_notify_jvmti_events()) {
-      jvmti_mount_end(_thread, _cont, top, has_oop_on_stub);
-    } else {
-      _thread->set_is_in_VTMS_transition(false);
+    bool is_vthread = Continuation::continuation_scope(_cont.continuation()) == java_lang_VirtualThread::vthread_scope();
+    if (is_vthread) {
+      if (JvmtiVTMSTransitionDisabler::VTMS_notify_jvmti_events()) {
+        jvmti_mount_end(_thread, _cont, top, has_oop_on_stub);
+      } else {
+        _thread->set_is_in_VTMS_transition(false);
+        java_lang_Thread::set_is_in_VTMS_transition(_thread->vthread(), false);
+      }
     }
 #endif
 
