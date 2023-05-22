@@ -26,7 +26,6 @@ package jdk.internal.vm;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
@@ -50,7 +49,7 @@ public class SharedThreadContainer extends ThreadContainer implements AutoClosea
             VIRTUAL_THREADS = l.findVarHandle(SharedThreadContainer.class,
                     "virtualThreads", Set.class);
         } catch (Exception e) {
-            throw new InternalError(e);
+            throw new ExceptionInInitializerError(e);
         }
     }
 
@@ -98,6 +97,11 @@ public class SharedThreadContainer extends ThreadContainer implements AutoClosea
      */
     public static SharedThreadContainer create(String name) {
         return create(ThreadContainers.root(), name);
+    }
+
+    @Override
+    public String name() {
+        return name;
     }
 
     @Override
@@ -169,16 +173,6 @@ public class SharedThreadContainer extends ThreadContainer implements AutoClosea
     public void close() {
         if (!closed && CLOSED.compareAndSet(this, false, true)) {
             ThreadContainers.deregisterContainer(key);
-        }
-    }
-
-    @Override
-    public String toString() {
-        String id = Objects.toIdentityString(this);
-        if (name != null) {
-            return name + "/" + id;
-        } else {
-            return id;
         }
     }
 }

@@ -46,8 +46,8 @@ import sun.security.action.GetPropertyAction;
  * execution by a thread. A {@code ScopedValue} allows for safely and efficiently sharing
  * data for a bounded period of execution without passing the data as method arguments.
  *
- * <p> {@code ScopedValue} defines the {@link #where(ScopedValue, Object, Runnable)}
- * method to set the value of a {@code ScopedValue} for the bouned period of execution by
+ * <p> {@code ScopedValue} defines the {@link #runWhere(ScopedValue, Object, Runnable)}
+ * method to set the value of a {@code ScopedValue} for the bounded period of execution by
  * a thread of the runnable's {@link Runnable#run() run} method. The unfolding execution of
  * the methods executed by {@code run} defines a <b><em>dynamic scope</em></b>. The scoped
  * value is {@linkplain #isBound() bound} while executing in the dynamic scope, it reverts
@@ -66,7 +66,7 @@ import sun.security.action.GetPropertyAction;
  *     // @link substring="newInstance" target="#newInstance" :
  *     private static final ScopedValue<String> USERNAME = ScopedValue.newInstance();
  *
- *     ScopedValue.where(USERNAME, "duke", () -> doSomething());
+ *     ScopedValue.runWhere(USERNAME, "duke", () -> doSomething());
  * }
  * Code executed directly or indirectly by {@code doSomething()} that invokes {@code
  * USERNAME.get()} will read the value "{@code duke}". The scoped value is bound while
@@ -77,11 +77,12 @@ import sun.security.action.GetPropertyAction;
  * {@code USERNAME.get()} would read the value "{@code duke1}" or "{@code duke2}",
  * depending on which thread is executing.
  *
- * <p> In addition to the {@code where} method that executes a {@code run} method, {@code
- * ScopedValue} defines the {@link #where(ScopedValue, Object, Callable)} method to execute
- * a method that returns a result. It also defines the {@link #where(ScopedValue, Object)}
- * method for cases where it is useful to accumulate mappings of {@code ScopedValue} to
- * value.
+ * <p> In addition to the {@code runWhere} method that executes a {@code run} method, {@code
+ * ScopedValue} defines the {@link #callWhere(ScopedValue, Object, Callable)} and
+ * {@link #getWhere(ScopedValue, Object, Supplier)} methods to execute
+ * methods that returns results. It also defines the {@link #where(ScopedValue, Object)}
+ * method for cases where it is useful to accumulate mappings of multiple {@code ScopedValue}s to
+ * bound values.
  *
  * <p> A {@code ScopedValue} will typically be declared in a {@code final} and {@code
  * static} field. The accessibility of the field will determine which components can
@@ -102,7 +103,7 @@ import sun.security.action.GetPropertyAction;
  * <p> In the above example, suppose that code executed by {@code doSomething()} binds
  * {@code USERNAME} to a new value with:
  * {@snippet lang=java :
- *     ScopedValue.where(USERNAME, "duchess", () -> doMore());
+ *     ScopedValue.runWhere(USERNAME, "duchess", () -> doMore());
  * }
  * Code executed directly or indirectly by {@code doMore()} that invokes {@code
  * USERNAME.get()} will read the value "{@code duchess}". When {@code doMore()} completes
@@ -127,7 +128,7 @@ import sun.security.action.GetPropertyAction;
  * {@snippet lang=java :
  *     private static final ScopedValue<String> USERNAME = ScopedValue.newInstance();
 
- *     ScopedValue.where(USERNAME, "duke", () -> {
+ *     ScopedValue.runWhere(USERNAME, "duke", () -> {
  *         try (var scope = new StructuredTaskScope<String>()) {
  *
  *             scope.fork(() -> childTask1());
@@ -243,7 +244,7 @@ public final class ScopedValue<T> {
     /**
      * A mapping of scoped values, as <em>keys</em>, to values.
      *
-     * <p> A {@code Carrier} is used to accumlate mappings so that an operation (a
+     * <p> A {@code Carrier} is used to accumulate mappings so that an operation (a
      * {@link Runnable} or {@link Callable}) can be executed with all scoped values in the
      * mapping bound to values. The following example runs an operation with {@code k1}
      * bound (or rebound) to {@code v1}, and {@code k2} bound (or rebound) to {@code v2}.
@@ -284,8 +285,7 @@ public final class ScopedValue<T> {
         /**
          * Add a binding to this map, returning a new Carrier instance.
          */
-        private static final <T> Carrier where(ScopedValue<T> key, T value,
-                                               Carrier prev) {
+        private static <T> Carrier where(ScopedValue<T> key, T value, Carrier prev) {
             return new Carrier(key, value, prev);
         }
 
@@ -312,11 +312,11 @@ public final class ScopedValue<T> {
             return where(key, value, null);
         }
 
-        final Object get() {
+        Object get() {
             return value;
         }
 
-        final ScopedValue<?> getKey() {
+        ScopedValue<?> getKey() {
             return key;
         }
 
@@ -361,7 +361,7 @@ public final class ScopedValue<T> {
          * @param <R> the type of the result of the operation
          * @return the result
          * @throws Exception if {@code op} completes with an exception
-         * @see ScopedValue#where(ScopedValue, Object, Callable)
+         * @see ScopedValue#callWhere(ScopedValue, Object, Callable) callWhere(ScopedValue, Object, Callable)
          */
         public <R> R call(Callable<? extends R> op) throws Exception {
             Objects.requireNonNull(op);
@@ -369,6 +369,48 @@ public final class ScopedValue<T> {
             var prevSnapshot = scopedValueBindings();
             var newSnapshot = new Snapshot(this, prevSnapshot);
             return runWith(newSnapshot, op);
+        }
+
+        /**
+         * Invokes a supplier of results with each scoped value in this mapping bound
+         * to its value in the current thread.
+         * When the operation completes (normally or with an exception), each scoped value
+         * in the mapping will revert to being unbound, or revert to its previous value
+         * when previously bound, in the current thread.
+         *
+         * <p> Scoped values are intended to be used in a <em>structured manner</em>.
+         * If {@code op} creates a {@link StructuredTaskScope} but does not {@linkplain
+         * StructuredTaskScope#close() close} it, then exiting {@code op} causes the
+         * underlying construct of each {@code StructuredTaskScope} created in the
+         * dynamic scope to be closed. This may require blocking until all child threads
+         * have completed their sub-tasks. The closing is done in the reverse order that
+         * they were created. Once closed, {@link StructureViolationException} is thrown.
+         *
+         * @param op the operation to run
+         * @param <R> the type of the result of the operation
+         * @return the result
+         * @see ScopedValue#getWhere(ScopedValue, Object, Supplier)
+         */
+        public <R> R get(Supplier<? extends R> op) {
+            Objects.requireNonNull(op);
+            Cache.invalidate(bitmask);
+            var prevSnapshot = scopedValueBindings();
+            var newSnapshot = new Snapshot(this, prevSnapshot);
+            return runWith(newSnapshot, new CallableAdapter<R>(op));
+        }
+
+        // A lightweight adapter from Supplier to Callable. This is
+        // used here to create the Callable which is passed to
+        // Carrier#call() in this thread because it needs neither
+        // runtime bytecode generation nor any release fencing.
+        private static final class CallableAdapter<V> implements Callable<V> {
+            private final Supplier<? extends V> s;
+            CallableAdapter(Supplier<? extends V> s) {
+                this.s = s;
+            }
+            public V call() {
+                return s.get();
+            }
         }
 
         /**
@@ -380,7 +422,7 @@ public final class ScopedValue<T> {
          */
         @Hidden
         @ForceInline
-        private <R> R runWith(Snapshot newSnapshot, Callable<R> op) throws Exception {
+        private <R> R runWith(Snapshot newSnapshot, Callable<R> op) {
             try {
                 Thread.setScopedValueBindings(newSnapshot);
                 Thread.ensureMaterializedForStackWalk(newSnapshot);
@@ -408,7 +450,7 @@ public final class ScopedValue<T> {
          * they were created. Once closed, {@link StructureViolationException} is thrown.
          *
          * @param op the operation to run
-         * @see ScopedValue#where(ScopedValue, Object, Runnable)
+         * @see ScopedValue#runWhere(ScopedValue, Object, Runnable)
          */
         public void run(Runnable op) {
             Objects.requireNonNull(op);
@@ -489,10 +531,44 @@ public final class ScopedValue<T> {
      * @return the result
      * @throws Exception if the operation completes with an exception
      */
-    public static <T, R> R where(ScopedValue<T> key,
-                                 T value,
-                                 Callable<? extends R> op) throws Exception {
+    public static <T, R> R callWhere(ScopedValue<T> key,
+                                     T value,
+                                     Callable<? extends R> op) throws Exception {
         return where(key, value).call(op);
+    }
+
+    /**
+     * Invokes a supplier of results with a {@code ScopedValue} bound to a value
+     * in the current thread. When the operation completes (normally or with an
+     * exception), the {@code ScopedValue} will revert to being unbound, or revert to
+     * its previous value when previously bound, in the current thread.
+     *
+     * <p> Scoped values are intended to be used in a <em>structured manner</em>.
+     * If {@code op} creates a {@link StructuredTaskScope} but does not {@linkplain
+     * StructuredTaskScope#close() close} it, then exiting {@code op} causes the
+     * underlying construct of each {@code StructuredTaskScope} created in the
+     * dynamic scope to be closed. This may require blocking until all child threads
+     * have completed their sub-tasks. The closing is done in the reverse order that
+     * they were created. Once closed, {@link StructureViolationException} is thrown.
+     *
+     * @implNote
+     * This method is implemented to be equivalent to:
+     * {@snippet lang=java :
+     *     // @link substring="get" target="Carrier#get(Supplier)" :
+     *     ScopedValue.where(key, value).get(op);
+     * }
+     *
+     * @param key the {@code ScopedValue} key
+     * @param value the value, can be {@code null}
+     * @param <T> the type of the value
+     * @param <R> the result type
+     * @param op the operation to call
+     * @return the result
+     */
+    public static <T, R> R getWhere(ScopedValue<T> key,
+                                    T value,
+                                    Supplier<? extends R> op) {
+        return where(key, value).get(op);
     }
 
     /**
@@ -521,7 +597,7 @@ public final class ScopedValue<T> {
      * @param <T> the type of the value
      * @param op the operation to call
      */
-    public static <T> void where(ScopedValue<T> key, T value, Runnable op) {
+    public static <T> void runWhere(ScopedValue<T> key, T value, Runnable op) {
         where(key, value).run(op);
     }
 

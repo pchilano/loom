@@ -70,12 +70,14 @@ public @interface PreviewFeature {
         RECORD_PATTERNS,
         // not used
         VIRTUAL_THREADS,
-        @JEP(number=434, title="Foreign Function & Memory API", status="Second Preview")
+        @JEP(number=442, title="Foreign Function & Memory API", status="Third Preview")
         FOREIGN,
-        @JEP(number=100_001, title="Structured Concurrency", status="Preview")
-        STRUCTURED_CONCURRENCY,
-        @JEP(number=100_002, title="Scoped Values", status="Preview")
+        @JEP(number=430, title="String Templates", status="First Preview")
+        STRING_TEMPLATES,
+        @JEP(number=446, title="Scoped Values", status="Preview")
         SCOPED_VALUES,
+        @JEP(number=453, title="Structured Concurrency", status="Preview")
+        STRUCTURED_CONCURRENCY,
         /**
          * A key for testing.
          */

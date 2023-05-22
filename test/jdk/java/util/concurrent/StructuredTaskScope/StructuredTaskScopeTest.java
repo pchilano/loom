@@ -23,7 +23,7 @@
 
 /*
  * @test id=platform
- * @bug 8284199
+ * @bug 8284199 8296779 8306647
  * @summary Basic tests for StructuredTaskScope
  * @enablePreview
  * @run junit/othervm -DthreadFactory=platform StructuredTaskScopeTest
@@ -35,20 +35,15 @@
  * @run junit/othervm -DthreadFactory=virtual StructuredTaskScopeTest
  */
 
-import java.util.concurrent.StructuredTaskScope;
-import java.util.concurrent.StructuredTaskScope.ShutdownOnSuccess;
-import java.util.concurrent.StructuredTaskScope.ShutdownOnFailure;
-import java.util.concurrent.StructureViolationException;
 import java.time.Duration;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.NoSuchElementException;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutionException;
@@ -58,10 +53,15 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.StructuredTaskScope;
+import java.util.concurrent.StructuredTaskScope.Subtask;
+import java.util.concurrent.StructuredTaskScope.ShutdownOnSuccess;
+import java.util.concurrent.StructuredTaskScope.ShutdownOnFailure;
+import java.util.concurrent.StructureViolationException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 import org.junit.jupiter.api.Test;
@@ -100,39 +100,61 @@ class StructuredTaskScopeTest {
     }
 
     /**
-     * Test that each fork creates a thread.
+     * Test that fork creates a new thread for each task.
      */
     @ParameterizedTest
     @MethodSource("factories")
-    void testFork1(ThreadFactory factory) throws Exception {
-        AtomicInteger count = new AtomicInteger();
-        try (var scope = new StructuredTaskScope(null, factory)) {
+    void testForkCreatesThread(ThreadFactory factory) throws Exception {
+        Set<Long> tids = ConcurrentHashMap.newKeySet();
+        try (var scope = new StructuredTaskScope<Object>(null, factory)) {
             for (int i = 0; i < 100; i++) {
-                scope.fork(() -> count.incrementAndGet());
+                scope.fork(() -> {
+                    tids.add(Thread.currentThread().threadId());
+                    return null;
+                });
             }
             scope.join();
         }
-        assertTrue(count.get() == 100);
+        assertEquals(100, tids.size());
     }
 
     /**
-     * Test that fork uses the specified thread factory.
+     * Test that fork creates a new virtual thread for each task.
+     */
+    @Test
+    void testForkCreateVirtualThread() throws Exception {
+        Set<Thread> threads = ConcurrentHashMap.newKeySet();
+        try (var scope = new StructuredTaskScope<Object>()) {
+            for (int i = 0; i < 100; i++) {
+                scope.fork(() -> {
+                    threads.add(Thread.currentThread());
+                    return null;
+                });
+            }
+            scope.join();
+        }
+        assertEquals(100, threads.size());
+        threads.forEach(t -> assertTrue(t.isVirtual()));
+    }
+
+    /**
+     * Test that fork creates a new thread with the given thread factory.
      */
     @ParameterizedTest
     @MethodSource("factories")
-    void testFork2(ThreadFactory factory) throws Exception {
-        AtomicInteger count = new AtomicInteger();
+    void testForkUsesFactory(ThreadFactory factory) throws Exception {
+        var count = new AtomicInteger();
         ThreadFactory countingFactory = task -> {
             count.incrementAndGet();
             return factory.newThread(task);
         };
-        try (var scope = new StructuredTaskScope(null, countingFactory)) {
+        try (var scope = new StructuredTaskScope<Object>(null, countingFactory)) {
             for (int i = 0; i < 100; i++) {
                 scope.fork(() -> null);
             }
             scope.join();
         }
-        assertTrue(count.get() == 100);
+        assertEquals(100, count.get());
     }
 
     /**
@@ -141,67 +163,88 @@ class StructuredTaskScopeTest {
     @ParameterizedTest
     @MethodSource("factories")
     void testForkConfined(ThreadFactory factory) throws Exception {
-        try (var scope1 = new StructuredTaskScope();
-             var scope2 = new StructuredTaskScope()) {
+        try (var scope1 = new StructuredTaskScope<Boolean>();
+             var scope2 = new StructuredTaskScope<Boolean>()) {
 
             // thread in scope1 cannot fork thread in scope2
-            Future<Void> future1 = scope1.fork(() -> {
-                scope2.fork(() -> null).get();
-                return null;
+            Subtask<Boolean> subtask1 = scope1.fork(() -> {
+                assertThrows(WrongThreadException.class, () -> {
+                    scope2.fork(() -> null);
+                });
+                return true;
             });
-            Throwable ex = assertThrows(ExecutionException.class, future1::get);
-            assertTrue(ex.getCause() instanceof WrongThreadException);
 
             // thread in scope2 can fork thread in scope1
-            Future<Void> future2 = scope2.fork(() -> {
-                scope1.fork(() -> null).get();
-                return null;
+            Subtask<Boolean> subtask2 = scope2.fork(() -> {
+                scope1.fork(() -> null);
+                return true;
             });
-            future2.get();
-            assertNull(future2.resultNow());
-
-            // random thread cannot fork
-            try (var pool = Executors.newCachedThreadPool(factory)) {
-                Future<Void> future = pool.submit(() -> {
-                    scope1.fork(() -> null);
-                    return null;
-                });
-                ex = assertThrows(ExecutionException.class, future::get);
-                assertTrue(ex.getCause() instanceof WrongThreadException);
-            }
 
             scope2.join();
             scope1.join();
+
+            assertTrue(subtask1.get());
+            assertTrue(subtask2.get());
+
+            // random thread cannot fork
+            try (var pool = Executors.newSingleThreadExecutor()) {
+                Future<Void> future = pool.submit(() -> {
+                    assertThrows(WrongThreadException.class, () -> {
+                        scope1.fork(() -> null);
+                    });
+                    assertThrows(WrongThreadException.class, () -> {
+                        scope2.fork(() -> null);
+                    });
+                    return null;
+                });
+                future.get();
+            }
         }
     }
 
     /**
-     * Test fork when scope is shutdown.
+     * Test fork after join.
+     */
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testForkAfterJoin(ThreadFactory factory) throws Exception {
+        try (var scope = new StructuredTaskScope<String>(null, factory)) {
+            scope.join();
+            Subtask<String> subtask = scope.fork(() -> "foo");
+            scope.join();
+            assertEquals(Subtask.State.SUCCESS, subtask.state());
+            assertEquals("foo", subtask.get());
+            assertThrows(IllegalStateException.class, subtask::exception);
+        }
+    }
+
+    /**
+     * Test fork after scope is shutdown.
      */
     @ParameterizedTest
     @MethodSource("factories")
     void testForkAfterShutdown(ThreadFactory factory) throws Exception {
-        AtomicInteger count = new AtomicInteger();
-        try (var scope = new StructuredTaskScope(null, factory)) {
+        var executed = new AtomicBoolean();
+        try (var scope = new StructuredTaskScope<Object>(null, factory)) {
             scope.shutdown();
-            Future<String> future = scope.fork(() -> {
-                count.incrementAndGet();
-                return "foo";
+            Subtask<String> subtask = scope.fork(() -> {
+                executed.set(true);
+                return null;
             });
-            assertTrue(future.isCancelled());
-            scope.join();
+            assertEquals(Subtask.State.NOT_RUN, subtask.state());
+            assertThrows(IllegalStateException.class, subtask::get);
+            assertTrue(subtask.exception() instanceof CancellationException);
         }
-        assertTrue(count.get() == 0);   // check that task did not run.
+        assertFalse(executed.get());
     }
 
     /**
-     * Test fork when scope is closed.
+     * Test fork after scope is closed.
      */
     @ParameterizedTest
     @MethodSource("factories")
     void testForkAfterClose(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope(null, factory)) {
-            scope.join();
+        try (var scope = new StructuredTaskScope<Object>(null, factory)) {
             scope.close();
             assertThrows(IllegalStateException.class, () -> scope.fork(() -> null));
         }
@@ -211,105 +254,11 @@ class StructuredTaskScopeTest {
      * Test fork when the thread factory rejects creating a thread.
      */
     @Test
-    void testForkReject() throws Exception {
+    void testForkRejectedExecutionException() throws Exception {
         ThreadFactory factory = task -> null;
         try (var scope = new StructuredTaskScope(null, factory)) {
             assertThrows(RejectedExecutionException.class, () -> scope.fork(() -> null));
             scope.join();
-        }
-    }
-
-    /**
-     * A StructuredTaskScope that collects all Future objects notified to the
-     * handleComplete method.
-     */
-    private static class CollectAll<T> extends StructuredTaskScope<T> {
-        private final List<Future<T>> futures = new CopyOnWriteArrayList<>();
-
-        CollectAll(ThreadFactory factory) {
-            super(null, factory);
-        }
-
-        @Override
-        protected void handleComplete(Future<T> future) {
-            assertTrue(future.isDone());
-            futures.add(future);
-        }
-
-        Stream<Future<T>> futures() {
-            return futures.stream();
-        }
-
-        Set<Future<T>> futuresAsSet() {
-            return futures.stream().collect(Collectors.toSet());
-        }
-    }
-
-    /**
-     * Test that handleComplete method is invoked for tasks that complete normally
-     * and abnormally.
-     */
-    @ParameterizedTest
-    @MethodSource("factories")
-    void testHandleComplete1(ThreadFactory factory) throws Exception {
-        try (var scope = new CollectAll(factory)) {
-
-            // completes normally
-            Future<String> future1 = scope.fork(() -> "foo");
-
-            // completes with exception
-            Future<String> future2 = scope.fork(() -> { throw new FooException(); });
-
-            // cancelled
-            Future<String> future3 = scope.fork(() -> {
-                Thread.sleep(Duration.ofDays(1));
-                return null;
-            });
-            future3.cancel(true);
-
-            scope.join();
-
-            Set<Future<String>> futures = scope.futuresAsSet();
-            assertEquals(Set.of(future1, future2, future3), futures);
-        }
-    }
-
-    /**
-     * Test that the handeComplete method is not invoked after the scope has been shutdown.
-     */
-    @ParameterizedTest
-    @MethodSource("factories")
-    void testHandleComplete2(ThreadFactory factory) throws Exception {
-        try (var scope = new CollectAll(factory)) {
-            var latch = new CountDownLatch(1);
-
-            // start task that does not respond to interrupt
-            Future<String> future1 = scope.fork(() -> {
-                boolean done = false;
-                while (!done) {
-                    try {
-                        latch.await();
-                        done = true;
-                    } catch (InterruptedException e) { }
-                }
-                return null;
-            });
-
-            // start a second task to shutdown the scope after a short delay
-            Future<String> future2 = scope.fork(() -> {
-                Thread.sleep(Duration.ofMillis(100));
-                scope.shutdown();
-                return null;
-            });
-
-            scope.join();
-
-            // let task finish
-            latch.countDown();
-
-            // handleComplete should not have been called
-            assertTrue(future1.isDone());
-            assertTrue(scope.futures().count() == 0L);
         }
     }
 
@@ -330,12 +279,12 @@ class StructuredTaskScopeTest {
     @MethodSource("factories")
     void testJoinWithThreads(ThreadFactory factory) throws Exception {
         try (var scope = new StructuredTaskScope(null, factory)) {
-            Future<String> future = scope.fork(() -> {
+            Subtask<String> subtask = scope.fork(() -> {
                 Thread.sleep(Duration.ofMillis(50));
                 return "foo";
             });
             scope.join();
-            assertEquals("foo", future.resultNow());
+            assertEquals("foo", subtask.get());
         }
     }
 
@@ -345,26 +294,26 @@ class StructuredTaskScopeTest {
     @ParameterizedTest
     @MethodSource("factories")
     void testJoinConfined(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope()) {
-            // attempt to join on thread in scope
-            Future<Void> future1 = scope.fork(() -> {
-                scope.join();
-                return null;
-            });
-            Throwable ex = assertThrows(ExecutionException.class, future1::get);
-            assertTrue(ex.getCause() instanceof WrongThreadException);
+        try (var scope = new StructuredTaskScope<Boolean>()) {
 
-            // random thread cannot join
-            try (var pool = Executors.newCachedThreadPool(factory)) {
-                Future<Void> future2 = pool.submit(() -> {
-                    scope.join();
-                    return null;
-                });
-                ex = assertThrows(ExecutionException.class, future2::get);
-                assertTrue(ex.getCause() instanceof WrongThreadException);
-            }
+            // thread in scope cannot join
+            Subtask<Boolean> subtask = scope.fork(() -> {
+                assertThrows(WrongThreadException.class, () -> { scope.join(); });
+                return true;
+            });
 
             scope.join();
+
+            assertTrue(subtask.get());
+
+            // random thread cannot join
+            try (var pool = Executors.newSingleThreadExecutor()) {
+                Future<Void> future = pool.submit(() -> {
+                    assertThrows(WrongThreadException.class, scope::join);
+                    return null;
+                });
+                future.get();
+            }
         }
     }
 
@@ -377,7 +326,7 @@ class StructuredTaskScopeTest {
         try (var scope = new StructuredTaskScope(null, factory)) {
             var latch = new CountDownLatch(1);
 
-            Future<String> future = scope.fork(() -> {
+            Subtask<String> subtask = scope.fork(() -> {
                 latch.await();
                 return "foo";
             });
@@ -396,7 +345,7 @@ class StructuredTaskScopeTest {
 
             // join should complete
             scope.join();
-            assertEquals("foo", future.resultNow());
+            assertEquals("foo", subtask.get());
         }
     }
 
@@ -409,7 +358,7 @@ class StructuredTaskScopeTest {
         try (var scope = new StructuredTaskScope(null, factory)) {
             var latch = new CountDownLatch(1);
 
-            Future<String> future = scope.fork(() -> {
+            Subtask<String> subtask = scope.fork(() -> {
                 latch.await();
                 return "foo";
             });
@@ -428,26 +377,38 @@ class StructuredTaskScopeTest {
 
             // join should complete
             scope.join();
-            assertEquals("foo", future.resultNow());
+            assertEquals("foo", subtask.get());
         }
     }
 
     /**
-     * Test join when scope is already shutdown.
+     * Test join when scope is shutdown.
      */
     @ParameterizedTest
     @MethodSource("factories")
     void testJoinWithShutdown1(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope(null, factory)) {
-            Future<String> future = scope.fork(() -> {
-                Thread.sleep(Duration.ofDays(1));
+        try (var scope = new StructuredTaskScope<String>(null, factory)) {
+            var interrupted = new CountDownLatch(1);
+            var finish = new CountDownLatch(1);
+
+            Subtask<String> subtask = scope.fork(() -> {
+                try {
+                    Thread.sleep(Duration.ofDays(1));
+                } catch (InterruptedException e) {
+                    interrupted.countDown();
+                }
+                finish.await();
                 return "foo";
             });
-            scope.shutdown();  // interrupts task
+
+            scope.shutdown();      // should interrupt task
+
+            interrupted.await();
+
             scope.join();
 
-            // task should have completed abnormally
-            assertTrue(future.isDone() && future.state() != Future.State.SUCCESS);
+            // signal task to finish
+            finish.countDown();
         }
     }
 
@@ -462,38 +423,34 @@ class StructuredTaskScopeTest {
                 super(null, factory);
             }
             @Override
-            protected void handleComplete(Future<T> future) {
+            protected void handleComplete(Subtask<? extends T> subtask) {
                 shutdown();
             }
         }
 
-        try (var scope = new MyScope(factory)) {
-            Future<String> future1 = scope.fork(() -> {
-                Thread.sleep(Duration.ofDays(1));
+        try (var scope = new MyScope<String>(factory)) {
+            Subtask<String> subtask1 = scope.fork(() -> {
+                Thread.sleep(Duration.ofMillis(50));
                 return "foo";
             });
-            Future<String> future2 = scope.fork(() -> {
-                Thread.sleep(Duration.ofMillis(50));
-                return null;
+            Subtask<String> subtask2 = scope.fork(() -> {
+                Thread.sleep(Duration.ofDays(1));
+                return "bar";
             });
+
+            // join should wakeup when shutdown is called
             scope.join();
 
-            // task1 should have completed abnormally
-            assertTrue(future1.isDone() && future1.state() != Future.State.SUCCESS);
+            // task1 should have completed successfully
+            assertEquals(Subtask.State.SUCCESS, subtask1.state());
+            assertEquals("foo", subtask1.get());
 
-            // task2 should have completed normally
-            assertTrue(future2.isDone() && future2.state() == Future.State.SUCCESS);
-        }
-    }
-
-    /**
-     * Test join after scope is shutdown.
-     */
-    @Test
-    void testJoinAfterShutdown() throws Exception {
-        try (var scope = new StructuredTaskScope()) {
-            scope.shutdown();
-            scope.join();
+            // task2 should have been interrupted
+            while (subtask2.state() == Subtask.State.RUNNING) {
+                Thread.sleep(10);
+            }
+            assertEquals(Subtask.State.FAILED, subtask2.state());
+            assertTrue(subtask2.exception() instanceof InterruptedException);
         }
     }
 
@@ -516,19 +473,18 @@ class StructuredTaskScopeTest {
     @ParameterizedTest
     @MethodSource("factories")
     void testJoinUntil1(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope(null, factory)) {
-            Future<String> future = scope.fork(() -> {
+        try (var scope = new StructuredTaskScope<String>(null, factory)) {
+            Subtask<String> subtask = scope.fork(() -> {
                 try {
                     Thread.sleep(Duration.ofSeconds(2));
                 } catch (InterruptedException e) { }
-                return null;
+                return "foo";
             });
 
             long startMillis = millisTime();
             scope.joinUntil(Instant.now().plusSeconds(30));
-            assertTrue(future.isDone());
-            assertNull(future.resultNow());
             expectDuration(startMillis, /*min*/1900, /*max*/20_000);
+            assertEquals("foo", subtask.get());
         }
     }
 
@@ -538,11 +494,9 @@ class StructuredTaskScopeTest {
     @ParameterizedTest
     @MethodSource("factories")
     void testJoinUntil2(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope(null, factory)) {
-            Future<String> future = scope.fork(() -> {
-                try {
-                    Thread.sleep(Duration.ofSeconds(30));
-                } catch (InterruptedException e) { }
+        try (var scope = new StructuredTaskScope<Object>(null, factory)) {
+            Subtask<Void> subtask = scope.fork(() -> {
+                Thread.sleep(Duration.ofSeconds(30));
                 return null;
             });
 
@@ -552,7 +506,7 @@ class StructuredTaskScopeTest {
             } catch (TimeoutException e) {
                 expectDuration(startMillis, /*min*/1900, /*max*/20_000);
             }
-            assertFalse(future.isDone());
+            assertEquals(Subtask.State.RUNNING, subtask.state());
         }
     }
 
@@ -562,25 +516,19 @@ class StructuredTaskScopeTest {
     @ParameterizedTest
     @MethodSource("factories")
     void testJoinUntil3(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope(null, factory)) {
-            Future<String> future = scope.fork(() -> {
-                try {
-                    Thread.sleep(Duration.ofSeconds(30));
-                } catch (InterruptedException e) { }
+        try (var scope = new StructuredTaskScope<String>(null, factory)) {
+            Subtask<String> subtask = scope.fork(() -> {
+                Thread.sleep(Duration.ofSeconds(30));
                 return null;
             });
 
-            try {
-                for (int i = 0; i < 3; i++) {
-                    try {
-                        scope.joinUntil(Instant.now().plusMillis(50));
-                        fail("joinUntil did not throw");
-                    } catch (TimeoutException expected) {
-                        assertFalse(future.isDone());
-                    }
+            for (int i = 0; i < 3; i++) {
+                try {
+                    scope.joinUntil(Instant.now().plusMillis(50));
+                    fail("joinUntil did not throw");
+                } catch (TimeoutException expected) {
+                    assertEquals(Subtask.State.RUNNING, subtask.state());
                 }
-            } finally {
-                future.cancel(true);
             }
         }
     }
@@ -591,34 +539,26 @@ class StructuredTaskScopeTest {
     @ParameterizedTest
     @MethodSource("factories")
     void testJoinUntil4(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope(null, factory)) {
-            Future<String> future = scope.fork(() -> {
-                try {
-                    Thread.sleep(Duration.ofSeconds(30));
-                } catch (InterruptedException e) { }
+        try (var scope = new StructuredTaskScope<Object>(null, factory)) {
+            Subtask<Void> subtask = scope.fork(() -> {
+                Thread.sleep(Duration.ofSeconds(30));
                 return null;
             });
 
+            // now
             try {
+                scope.joinUntil(Instant.now());
+                fail("joinUntil did not throw");
+            } catch (TimeoutException expected) {
+                assertEquals(Subtask.State.RUNNING, subtask.state());
+            }
 
-                // now
-                try {
-                    scope.joinUntil(Instant.now());
-                    fail("joinUntil did not throw");
-                } catch (TimeoutException expected) {
-                    assertFalse(future.isDone());
-                }
-
-                // in the past
-                try {
-                    scope.joinUntil(Instant.now().minusSeconds(1));
-                    fail("joinUntil did not throw");
-                } catch (TimeoutException expected) {
-                    assertFalse(future.isDone());
-                }
-
-            } finally {
-                future.cancel(true);
+            // in the past
+            try {
+                scope.joinUntil(Instant.now().minusSeconds(1));
+                fail("joinUntil did not throw");
+            } catch (TimeoutException expected) {
+                assertEquals(Subtask.State.RUNNING, subtask.state());
             }
         }
     }
@@ -629,10 +569,10 @@ class StructuredTaskScopeTest {
     @ParameterizedTest
     @MethodSource("factories")
     void testInterruptJoinUntil1(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope(null, factory)) {
+        try (var scope = new StructuredTaskScope<String>(null, factory)) {
             var latch = new CountDownLatch(1);
 
-            Future<String> future = scope.fork(() -> {
+            Subtask<String> subtask = scope.fork(() -> {
                 latch.await();
                 return "foo";
             });
@@ -651,7 +591,7 @@ class StructuredTaskScopeTest {
 
             // join should complete
             scope.join();
-            assertEquals("foo", future.resultNow());
+            assertEquals("foo", subtask.get());
         }
     }
 
@@ -664,7 +604,7 @@ class StructuredTaskScopeTest {
         try (var scope = new StructuredTaskScope(null, factory)) {
             var latch = new CountDownLatch(1);
 
-            Future<String> future = scope.fork(() -> {
+            Subtask<String> subtask = scope.fork(() -> {
                 latch.await();
                 return "foo";
             });
@@ -683,7 +623,100 @@ class StructuredTaskScopeTest {
 
             // join should complete
             scope.join();
-            assertEquals("foo", future.resultNow());
+            assertEquals("foo", subtask.get());
+        }
+    }
+
+    /**
+     * Test that shutdown prevents new threads from starting.
+     */
+    @Test
+    void testShutdownWithFork() throws Exception {
+        ThreadFactory factory = task -> null;
+        try (var scope = new StructuredTaskScope<Object>(null, factory)) {
+            scope.shutdown();
+            // should not invoke the ThreadFactory to create thread
+            Subtask<Void> subtask = scope.fork(() -> null);
+            assertEquals(Subtask.State.NOT_RUN, subtask.state());
+        }
+    }
+
+    /**
+     * Test that shutdown interrupts unfinished threads.
+     */
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testShutdownInterruptsThreads1(ThreadFactory factory) throws Exception {
+        try (var scope = new StructuredTaskScope<Object>(null, factory)) {
+            var interrupted = new AtomicBoolean();
+            var latch = new CountDownLatch(1);
+            var subtask = scope.fork(() -> {
+                try {
+                    Thread.sleep(Duration.ofDays(1));
+                } catch (InterruptedException e) {
+                    interrupted.set(true);
+                } finally {
+                    latch.countDown();
+                }
+                return null;
+            });
+
+            scope.shutdown();
+
+            // wait for task to complete
+            latch.await();
+            assertTrue(interrupted.get());
+
+            scope.join();
+        }
+    }
+
+    /**
+     * Test that shutdown does not interrupt current thread.
+     */
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testShutdownInterruptsThreads2(ThreadFactory factory) throws Exception {
+        try (var scope = new StructuredTaskScope<Object>(null, factory)) {
+            var interrupted = new AtomicBoolean();
+            var latch = new CountDownLatch(1);
+            var subtask = scope.fork(() -> {
+                try {
+                    scope.shutdown();
+                    interrupted.set(Thread.currentThread().isInterrupted());
+                } finally {
+                    latch.countDown();
+                }
+                return null;
+            });
+
+            // wait for task to complete
+            latch.await();
+            assertFalse(interrupted.get());
+
+            scope.join();
+        }
+    }
+
+    /**
+     * Test shutdown wakes join.
+     */
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testShutdownWakesJoin(ThreadFactory factory) throws Exception {
+        try (var scope = new StructuredTaskScope<Object>(null, factory)) {
+            var latch = new CountDownLatch(1);
+            scope.fork(() -> {
+                Thread.sleep(Duration.ofMillis(100));  // give time for join to block
+                scope.shutdown();
+                latch.await();
+                return null;
+            });
+
+            scope.join();
+
+            // join woke up, allow task to complete
+            latch.countDown();
         }
     }
 
@@ -692,10 +725,10 @@ class StructuredTaskScopeTest {
      */
     @Test
     void testShutdownAfterClose() throws Exception {
-        try (var scope = new StructuredTaskScope()) {
+        try (var scope = new StructuredTaskScope<Object>()) {
             scope.join();
             scope.close();
-            assertThrows(IllegalStateException.class, () -> scope.shutdown());
+            assertThrows(IllegalStateException.class, scope::shutdown);
         }
     }
 
@@ -705,37 +738,55 @@ class StructuredTaskScopeTest {
     @ParameterizedTest
     @MethodSource("factories")
     void testShutdownConfined(ThreadFactory factory) throws Exception {
-        try (var scope1 = new StructuredTaskScope();
-             var scope2 = new StructuredTaskScope()) {
-
-            // random thread cannot shutdown
-            try (var pool = Executors.newCachedThreadPool(factory)) {
-                Future<Void> future = pool.submit(() -> {
-                    scope1.shutdown();
-                    return null;
-                });
-                Throwable ex = assertThrows(ExecutionException.class, future::get);
-                assertTrue(ex.getCause() instanceof WrongThreadException);
-            }
+        try (var scope1 = new StructuredTaskScope<Boolean>();
+             var scope2 = new StructuredTaskScope<Boolean>()) {
 
             // thread in scope1 cannot shutdown scope2
-            Future<Void> future1 = scope1.fork(() -> {
-                scope2.shutdown();
-                return null;
+            Subtask<Boolean> subtask1 = scope1.fork(() -> {
+                assertThrows(WrongThreadException.class, scope2::shutdown);
+                return true;
             });
-            Throwable ex = assertThrows(ExecutionException.class, future1::get);
-            assertTrue(ex.getCause() instanceof WrongThreadException);
 
-            // thread in scope2 can shutdown scope1
-            Future<Void> future2 = scope2.fork(() -> {
+            // wait for task in scope1 to complete to avoid racing with task in scope2
+            while (subtask1.state() == Subtask.State.RUNNING) {
+                Thread.sleep(10);
+            }
+
+            // thread in scope2 shutdown scope1
+            Subtask<Boolean> subtask2 = scope2.fork(() -> {
                 scope1.shutdown();
-                return null;
+                return true;
             });
-            future2.get();
-            assertNull(future2.resultNow());
 
             scope2.join();
             scope1.join();
+
+            assertTrue(subtask1.get());
+            assertTrue(subtask1.get());
+
+            // random thread cannot shutdown
+            try (var pool = Executors.newSingleThreadExecutor()) {
+                Future<Void> future = pool.submit(() -> {
+                    assertThrows(WrongThreadException.class, scope1::shutdown);
+                    assertThrows(WrongThreadException.class, scope2::shutdown);
+                    return null;
+                });
+                future.get();
+            }
+        }
+    }
+
+    /**
+     * Test isShutdown.
+     */
+    @Test
+    public void testIsShutdown1() {
+        try (var scope = new StructuredTaskScope<Object>()) {
+            assertFalse(scope.isShutdown());   // before shutdown
+            scope.shutdown();
+            assertTrue(scope.isShutdown());    // after shutdown
+            scope.close();
+            assertTrue(scope.isShutdown());    // after cose
         }
     }
 
@@ -744,24 +795,27 @@ class StructuredTaskScopeTest {
      */
     @Test
     void testCloseWithoutJoin1() {
-        try (var scope = new StructuredTaskScope()) {
+        try (var scope = new StructuredTaskScope<Object>()) {
             // do nothing
         }
     }
 
     /**
-     * Test close without join, threads forked.
+     * Test close without join, unfinished threads.
      */
     @ParameterizedTest
     @MethodSource("factories")
     void testCloseWithoutJoin2(ThreadFactory factory) {
-        try (var scope = new StructuredTaskScope(null, factory)) {
-            Future<String> future = scope.fork(() -> {
+        try (var scope = new StructuredTaskScope<String>(null, factory)) {
+            Subtask<String> subtask = scope.fork(() -> {
                 Thread.sleep(Duration.ofDays(1));
                 return null;
             });
             assertThrows(IllegalStateException.class, scope::close);
-            assertTrue(future.isDone() && future.exceptionNow() != null);
+
+            // task should be interrupted
+            assertEquals(Subtask.State.FAILED, subtask.state());
+            assertTrue(subtask.exception() instanceof InterruptedException);
         }
     }
 
@@ -775,12 +829,15 @@ class StructuredTaskScopeTest {
             scope.fork(() -> "foo");
             scope.join();
 
-            Future<String> future = scope.fork(() -> {
+            Subtask<String> subtask = scope.fork(() -> {
                 Thread.sleep(Duration.ofDays(1));
                 return null;
             });
             assertThrows(IllegalStateException.class, scope::close);
-            assertTrue(future.isDone() && future.exceptionNow() != null);
+
+            // task should be interrupted
+            assertEquals(Subtask.State.FAILED, subtask.state());
+            assertTrue(subtask.exception() instanceof InterruptedException);
         }
     }
 
@@ -790,26 +847,25 @@ class StructuredTaskScopeTest {
     @ParameterizedTest
     @MethodSource("factories")
     void testCloseConfined(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope()) {
-            // attempt to close on thread in scope
-            Future<Void> future1 = scope.fork(() -> {
-                scope.close();
-                return null;
+        try (var scope = new StructuredTaskScope<Boolean>()) {
+
+            // attempt to close from thread in scope
+            Subtask<Boolean> subtask = scope.fork(() -> {
+                assertThrows(WrongThreadException.class, scope::close);
+                return true;
             });
-            Throwable ex = assertThrows(ExecutionException.class, future1::get);
-            assertTrue(ex.getCause() instanceof WrongThreadException);
+
+            scope.join();
+            assertTrue(subtask.get());
 
             // random thread cannot close scope
             try (var pool = Executors.newCachedThreadPool(factory)) {
-                Future<Void> future2 = pool.submit(() -> {
-                    scope.close();
+                Future<Boolean> future = pool.submit(() -> {
+                    assertThrows(WrongThreadException.class, scope::close);
                     return null;
                 });
-                ex = assertThrows(ExecutionException.class, future2::get);
-                assertTrue(ex.getCause() instanceof WrongThreadException);
+                future.get();
             }
-
-            scope.join();
         }
     }
 
@@ -819,7 +875,7 @@ class StructuredTaskScopeTest {
     @ParameterizedTest
     @MethodSource("factories")
     void testInterruptClose1(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope(null, factory)) {
+        try (var scope = new StructuredTaskScope<Object>(null, factory)) {
             var latch = new CountDownLatch(1);
 
             // start task that does not respond to interrupt
@@ -856,7 +912,7 @@ class StructuredTaskScopeTest {
     @ParameterizedTest
     @MethodSource("factories")
     void testInterruptClose2(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope(null, factory)) {
+        try (var scope = new StructuredTaskScope<Object>(null, factory)) {
             var latch = new CountDownLatch(1);
 
             // start task that does not respond to interrupt
@@ -886,13 +942,12 @@ class StructuredTaskScopeTest {
     }
 
     /**
-     * Test that closing an enclosing scope closes the thread flock of a
-     * nested scope.
+     * Test that closing an enclosing scope closes the thread flock of a nested scope.
      */
     @Test
-    void testStructureViolation1() throws Exception {
-        try (var scope1 = new StructuredTaskScope()) {
-            try (var scope2 = new StructuredTaskScope()) {
+    void testCloseThrowsStructureViolation() throws Exception {
+        try (var scope1 = new StructuredTaskScope<Object>()) {
+            try (var scope2 = new StructuredTaskScope<Object>()) {
 
                 // join + close enclosing scope
                 scope1.join();
@@ -902,197 +957,373 @@ class StructuredTaskScopeTest {
                 } catch (StructureViolationException expected) { }
 
                 // underlying flock should be closed, fork should return a cancelled task
-                AtomicBoolean ran = new AtomicBoolean();
-                Future<String> future = scope2.fork(() -> {
-                    ran.set(true);
+                var executed = new AtomicBoolean();
+                Subtask<Void> subtask = scope2.fork(() -> {
+                    executed.set(true);
                     return null;
                 });
-                assertTrue(future.isCancelled());
+                assertEquals(Subtask.State.NOT_RUN, subtask.state());
                 scope2.join();
-                assertFalse(ran.get());
+                assertFalse(executed.get());
             }
         }
     }
 
     /**
-     * Test Future::get, task completes normally.
+     * A StructuredTaskScope that collects the subtasks notified to the handleComplete method.
+     */
+    private static class CollectAll<T> extends StructuredTaskScope<T> {
+        private final Set<Subtask<? extends T>> subtasks = ConcurrentHashMap.newKeySet();
+
+        CollectAll(ThreadFactory factory) {
+            super(null, factory);
+        }
+
+        @Override
+        protected void handleComplete(Subtask<? extends T> subtask) {
+            subtasks.add(subtask);
+        }
+
+        Set<Subtask<? extends T>> subtasks() {
+            return subtasks;
+        }
+
+        Subtask<? extends T> find(Callable<T> task) {
+            return subtasks.stream()
+                    .filter(h -> task.equals(h.task()))
+                    .findAny()
+                    .orElseThrow();
+        }
+    }
+
+    /**
+     * Test that handleComplete method is invoked for tasks that complete before shutdown.
      */
     @ParameterizedTest
     @MethodSource("factories")
-    void testFuture1(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope(null, factory)) {
+    void testHandleCompleteBeforeShutdown(ThreadFactory factory) throws Exception {
+        try (var scope = new CollectAll<String>(factory)) {
+            Callable<String> task1 = () -> "foo";
+            Callable<String> task2 = () -> { throw new FooException(); };
+            scope.fork(task1);
+            scope.fork(task2);
+            scope.join();
 
-            Future<String> future = scope.fork(() -> {
-                Thread.sleep(Duration.ofMillis(20));
+            var subtask1  = scope.find(task1);
+            assertEquals("foo", subtask1.get());
+
+            var subtask2 = scope.find(task2);
+            assertTrue(subtask2.exception() instanceof FooException);
+        }
+    }
+
+    /**
+     * Test that handleComplete method is not invoked for tasks that complete after
+     * shutdown.
+     */
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testHandleCompleteAfterShutdown(ThreadFactory factory) throws Exception {
+        try (var scope = new CollectAll<String>(factory)) {
+            Callable<String> task1 = () -> {
+                try {
+                    Thread.sleep(Duration.ofDays(1));
+                } catch (InterruptedException ignore) { }
+                return "foo";
+            };
+            Callable<String> task2 = () -> {
+                Thread.sleep(Duration.ofDays(1));
+                return "bar";
+            };
+            Callable<String> task3 = () -> "baz";
+
+            // forked before shutdown, will complete after shutdown
+            scope.fork(task1);
+            scope.fork(task2);
+            scope.shutdown();
+            // forked after shutdown
+            scope.fork(task3);
+            scope.join();
+
+            // wait for tasks to complete
+            while (scope.subtasks().size() < 3) {
+                Thread.sleep(10);
+            }
+
+            var subtask1  = scope.find(task1);
+            assertEquals(Subtask.State.SUCCESS, subtask1.state());
+            assertEquals("foo", subtask1.get());
+
+            var subtask2 = scope.find(task2);
+            assertEquals(Subtask.State.FAILED, subtask2.state());
+            assertTrue(subtask2.exception() instanceof InterruptedException);
+
+            var subtask3 = scope.find(task3);
+            assertEquals(Subtask.State.NOT_RUN, subtask3.state());
+            assertTrue(subtask3.exception() instanceof CancellationException);
+        }
+    }
+
+    /**
+     * Test that the default handleComplete throws IllegalArgumentException if called
+     * with a running task.
+     */
+    @Test
+    void testHandleCompleteThrows() throws Exception {
+        class TestScope<T> extends StructuredTaskScope<T> {
+            protected void handleComplete(Subtask<? extends T> subtask) {
+                super.handleComplete(subtask);
+            }
+        }
+
+        try (var scope = new TestScope<String>()) {
+            var subtask = scope.fork(() -> {
+                Thread.sleep(Duration.ofDays(1));
                 return "foo";
             });
 
-            assertEquals("foo", future.get());
-            assertTrue(future.state() == Future.State.SUCCESS);
-            assertEquals("foo", future.resultNow());
-
-            scope.join();
-        }
-    }
-
-    /**
-     * Test Future::get, task completes with exception.
-     */
-    @ParameterizedTest
-    @MethodSource("factories")
-    void testFuture2(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope(null, factory)) {
-
-            Future<String> future = scope.fork(() -> {
-                Thread.sleep(Duration.ofMillis(20));
-                throw new FooException();
-            });
-
-            Throwable ex = assertThrows(ExecutionException.class, future::get);
-            assertTrue(ex.getCause() instanceof FooException);
-            assertTrue(future.state() == Future.State.FAILED);
-            assertTrue(future.exceptionNow() instanceof FooException);
-
-            scope.join();
-        }
-    }
-
-    /**
-     * Test Future::get, task is cancelled.
-     */
-    @ParameterizedTest
-    @MethodSource("factories")
-    void testFuture3(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope(null, factory)) {
-
-            Future<String> future = scope.fork(() -> {
-                Thread.sleep(Duration.ofDays(1));
-                return null;
-            });
-
-            // timed-get, should timeout
-            try {
-                future.get(20, TimeUnit.MILLISECONDS);
-                fail("Future.get did not throw");
-            } catch (TimeoutException expected) { }
-
-            future.cancel(true);
-            assertThrows(CancellationException.class, future::get);
-            assertTrue(future.state() == Future.State.CANCELLED);
-
-            scope.join();
-        }
-    }
-
-    /**
-     * Test scope shutdown with a thread blocked in Future::get.
-     */
-    @ParameterizedTest
-    @MethodSource("factories")
-    void testFutureWithShutdown(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope(null, factory)) {
-
-            // long running task
-            Future<String> future = scope.fork(() -> {
-                Thread.sleep(Duration.ofDays(1));
-                return null;
-            });
-
-            // start a thread to wait in Future::get
-            AtomicBoolean waitDone = new AtomicBoolean();
-            Thread waiter = Thread.startVirtualThread(() -> {
-                try {
-                    future.get();
-                } catch (ExecutionException | CancellationException e) {
-                    waitDone.set(true);
-                } catch (InterruptedException e) {
-                    System.out.println("waiter thread interrupted!");
-                }
-            });
-
-            // shutdown scope
+            // running task
+            assertEquals(Subtask.State.RUNNING, subtask.state());
+            assertThrows(IllegalArgumentException.class, () -> scope.handleComplete(subtask));
             scope.shutdown();
 
-            // Future should be done and thread should be awakened
-            assertTrue(future.isDone());
-            waiter.join();
-            assertTrue(waitDone.get());
+            // null task
+            assertThrows(NullPointerException.class, () -> scope.handleComplete(null));
 
             scope.join();
         }
     }
 
     /**
-     * Test Future::cancel throws if invoked by a thread that is not in the tree.
+     * Test ensureOwnerAndJoined.
      */
     @ParameterizedTest
     @MethodSource("factories")
-    void testFutureCancelConfined(ThreadFactory factory) throws Exception {
-        try (var scope = new StructuredTaskScope()) {
-            Future<String> future1 = scope.fork(() -> {
-                Thread.sleep(Duration.ofDays(1));
-                return "foo";
+    void testEnsureOwnerAndJoined(ThreadFactory factory) throws Exception {
+        class MyScope<T> extends StructuredTaskScope<T> {
+            MyScope(ThreadFactory factory) {
+                super(null, factory);
+            }
+            void invokeEnsureOwnerAndJoined() {
+                super.ensureOwnerAndJoined();
+            }
+        }
+
+        try (var scope = new MyScope<Boolean>(factory)) {
+            // owner thread, before join
+            scope.fork(() -> true);
+            assertThrows(IllegalStateException.class, () -> {
+                scope.invokeEnsureOwnerAndJoined();
             });
 
-            // random thread cannot cancel
-            try (var pool = Executors.newCachedThreadPool(factory)) {
-                Future<Void> future2 = pool.submit(() -> {
-                    future1.cancel(true);
+            // owner thread, after join
+            scope.join();
+            scope.invokeEnsureOwnerAndJoined();
+
+            // thread in scope cannot invoke ensureOwnerAndJoined
+            Subtask<Boolean> subtask = scope.fork(() -> {
+                assertThrows(WrongThreadException.class, () -> {
+                    scope.invokeEnsureOwnerAndJoined();
+                });
+                return true;
+            });
+            scope.join();
+            assertTrue(subtask.get());
+
+            // random thread cannot invoke ensureOwnerAndJoined
+            try (var pool = Executors.newSingleThreadExecutor()) {
+                Future<Void> future = pool.submit(() -> {
+                    assertThrows(WrongThreadException.class, () -> {
+                        scope.invokeEnsureOwnerAndJoined();
+                    });
                     return null;
                 });
-                Throwable ex = assertThrows(ExecutionException.class, future2::get);
-                assertTrue(ex.getCause() instanceof WrongThreadException);
-            } finally {
-                future1.cancel(true);
+                future.get();
             }
-            scope.join();
         }
     }
 
     /**
-     * Test StructuredTaskScope::toString includes the scope name.
+     * Test ensureOwnerAndJoined after the task scope has been closed.
+     */
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testEnsureOwnerAndJoinedAfterClose(ThreadFactory factory) throws Exception {
+        class MyScope<T> extends StructuredTaskScope<T> {
+            MyScope(ThreadFactory factory) {
+                super(null, factory);
+            }
+            public void invokeEnsureOwnerAndJoined() {
+                super.ensureOwnerAndJoined();
+            }
+        }
+
+        // ensureOwnerAndJoined after close, join invoked
+        try (var scope = new MyScope<String>(factory)) {
+            scope.fork(() -> "foo");
+            scope.join();
+            scope.close();
+            scope.invokeEnsureOwnerAndJoined();  // should not throw
+        }
+
+        // ensureOwnerAndJoined after close, join not invoked
+        try (var scope = new MyScope<String>(factory)) {
+            scope.fork(() -> "foo");
+            assertThrows(IllegalStateException.class, scope::close);
+            scope.invokeEnsureOwnerAndJoined();  // should not throw
+        }
+    }
+
+
+    /**
+     * Test toString.
      */
     @Test
     void testToString() throws Exception {
         ThreadFactory factory = Thread.ofVirtual().factory();
-        try (var scope = new StructuredTaskScope("xxx", factory)) {
+        try (var scope = new StructuredTaskScope<Object>("duke", factory)) {
             // open
-            assertTrue(scope.toString().contains("xxx"));
+            assertTrue(scope.toString().contains("duke"));
 
             // shutdown
             scope.shutdown();
-            assertTrue(scope.toString().contains("xxx"));
+            assertTrue(scope.toString().contains("duke"));
 
             // closed
             scope.join();
             scope.close();
-            assertTrue(scope.toString().contains("xxx"));
+            assertTrue(scope.toString().contains("duke"));
         }
     }
 
     /**
-     * Test for NullPointerException.
+     * Test Subtask with task that completes successfully.
+     */
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testSubtaskWhenSuccess(ThreadFactory factory) throws Exception {
+        try (var scope = new StructuredTaskScope<String>(null, factory)) {
+            Callable<String> task = () -> "foo";
+            Subtask<String> subtask = scope.fork(task);
+
+            // before join, owner thread
+            assertEquals(task, subtask.task());
+            assertThrows(IllegalStateException.class, subtask::get);
+            assertThrows(IllegalStateException.class, subtask::exception);
+
+            scope.join();
+
+            // after join
+            assertEquals(task, subtask.task());
+            assertEquals(Subtask.State.SUCCESS, subtask.state());
+            assertEquals("foo", subtask.get());
+            assertThrows(IllegalStateException.class, subtask::exception);
+        }
+    }
+
+    /**
+     * Test Subtask with task that fails.
+     */
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testSubtaskWhenFailed(ThreadFactory factory) throws Exception {
+        try (var scope = new StructuredTaskScope<String>(null, factory)) {
+            Callable<String> task = () -> { throw new FooException(); };
+            Subtask<String> subtask = scope.fork(task);
+
+            // before join, owner thread
+            assertEquals(task, subtask.task());
+            assertThrows(IllegalStateException.class, subtask::get);
+            assertThrows(IllegalStateException.class, subtask::exception);
+
+            scope.join();
+
+            // after join
+            assertEquals(task, subtask.task());
+            assertEquals(Subtask.State.FAILED, subtask.state());
+            assertThrows(IllegalStateException.class, subtask::get);
+            assertTrue(subtask.exception() instanceof FooException);
+        }
+    }
+
+    /**
+     * Test Subtask with a task that has not completed.
+     */
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testSubtaskWhenNotCompleted(ThreadFactory factory) throws Exception {
+        try (var scope = new StructuredTaskScope<Object>(null, factory)) {
+            Callable<Void> task = () -> {
+                Thread.sleep(Duration.ofDays(1));
+                return null;
+            };
+            Subtask<Void> subtask = scope.fork(task);
+
+            // join without waiting
+            assertThrows(TimeoutException.class, () -> scope.joinUntil(Instant.now()));
+
+            // not completed
+            assertEquals(task, subtask.task());
+            assertEquals(Subtask.State.RUNNING, subtask.state());
+            assertThrows(IllegalStateException.class, subtask::get);
+            assertThrows(IllegalStateException.class, subtask::exception);
+        }
+    }
+
+    /**
+     * Test Subtask when forked after shutdown.
+     */
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testSubtaskWhenShutdown(ThreadFactory factory) throws Exception {
+        try (var scope = new StructuredTaskScope<Object>(null, factory)) {
+            Callable<Void> task = () -> {
+                Thread.sleep(Duration.ofDays(1));
+                return null;
+            };
+
+            scope.shutdown();
+
+            // fork after shutdown
+            Subtask<Void> subtask = scope.fork(task);
+            assertEquals(task, subtask.task());
+            assertEquals(Subtask.State.NOT_RUN, subtask.state());
+            assertThrows(IllegalStateException.class, subtask::get);
+            assertTrue(subtask.exception() instanceof CancellationException);
+        }
+    }
+
+    /**
+     * Test Subtask::toString.
      */
     @Test
-    void testNulls() throws Exception {
-        assertThrows(NullPointerException.class, () -> new StructuredTaskScope("", null));
-        try (var scope = new StructuredTaskScope()) {
-            assertThrows(NullPointerException.class, () -> scope.fork(null));
-            assertThrows(NullPointerException.class, () -> scope.joinUntil(null));
-        }
+    void testSubtaskToString() throws Exception {
+        try (var scope = new StructuredTaskScope<Object>()) {
+            // success
+            var subtask1 = scope.fork(() -> "foo");
+            scope.join();
+            assertTrue(subtask1.toString().contains("Completed successfully"));
 
-        assertThrows(NullPointerException.class, () -> new ShutdownOnSuccess("", null));
-        try (var scope = new ShutdownOnSuccess<Object>()) {
-            assertThrows(NullPointerException.class, () -> scope.fork(null));
-            assertThrows(NullPointerException.class, () -> scope.joinUntil(null));
-            assertThrows(NullPointerException.class, () -> scope.result(null));
-        }
+            // failed
+            var subtask2 = scope.fork(() -> { throw new FooException(); });
+            scope.join();
+            assertTrue(subtask2.toString().contains("Failed"));
 
-        assertThrows(NullPointerException.class, () -> new ShutdownOnFailure("", null));
-        try (var scope = new ShutdownOnFailure()) {
-            assertThrows(NullPointerException.class, () -> scope.fork(null));
-            assertThrows(NullPointerException.class, () -> scope.joinUntil(null));
-            assertThrows(NullPointerException.class, () -> scope.throwIfFailed(null));
+            // not completed
+            Callable<Void> sleepForDay = () -> {
+                Thread.sleep(Duration.ofDays(1));
+                return null;
+            };
+            var subtask3 = scope.fork(sleepForDay);
+            assertTrue(subtask3.toString().contains("Not completed"));
+
+            scope.shutdown();
+
+            // forked after shutdown
+            var subtask4 = scope.fork(sleepForDay);
+            assertTrue(subtask4.toString().contains("Not run"));
+
+            scope.join();
         }
     }
 
@@ -1101,86 +1332,100 @@ class StructuredTaskScopeTest {
      */
     @Test
     void testShutdownOnSuccess1() throws Exception {
-        try (var scope = new ShutdownOnSuccess<String>()) {
+        try (var scope = new ShutdownOnSuccess<Object>()) {
             assertThrows(IllegalStateException.class, () -> scope.result());
             assertThrows(IllegalStateException.class, () -> scope.result(e -> null));
         }
     }
 
     /**
-     * Test ShutdownOnSuccess with tasks that completed normally.
+     * Test ShutdownOnSuccess with tasks that complete successfully.
      */
-    @Test
-    void testShutdownOnSuccess2() throws Exception {
-        try (var scope = new ShutdownOnSuccess<String>()) {
-
-            // two tasks complete normally
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testShutdownOnSuccess2(ThreadFactory factory) throws Exception {
+        try (var scope = new ShutdownOnSuccess<String>(null, factory)) {
             scope.fork(() -> "foo");
             scope.join();  // ensures foo completes first
             scope.fork(() -> "bar");
             scope.join();
-
             assertEquals("foo", scope.result());
             assertEquals("foo", scope.result(e -> null));
         }
     }
 
     /**
-     * Test ShutdownOnSuccess with tasks that completed normally and abnormally.
+     * Test ShutdownOnSuccess with a task that completes successfully with a null result.
      */
-    @Test
-    void testShutdownOnSuccess3() throws Exception {
-        try (var scope = new ShutdownOnSuccess<String>()) {
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testShutdownOnSuccess3(ThreadFactory factory) throws Exception {
+        try (var scope = new ShutdownOnSuccess<Object>(null, factory)) {
+            scope.fork(() -> null);
+            scope.join();
+            assertNull(scope.result());
+            assertNull(scope.result(e -> null));
+        }
+    }
 
-            // one task completes normally, the other with an exception
+    /**
+     * Test ShutdownOnSuccess with tasks that complete succcessfully and tasks that fail.
+     */
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testShutdownOnSuccess4(ThreadFactory factory) throws Exception {
+        try (var scope = new ShutdownOnSuccess<String>(null, factory)) {
             scope.fork(() -> "foo");
             scope.fork(() -> { throw new ArithmeticException(); });
             scope.join();
-
             assertEquals("foo", scope.result());
             assertEquals("foo", scope.result(e -> null));
         }
     }
 
     /**
-     * Test ShutdownOnSuccess with a task that completed with an exception.
+     * Test ShutdownOnSuccess with a task that fails.
      */
-    @Test
-    void testShutdownOnSuccess4() throws Exception {
-        try (var scope = new ShutdownOnSuccess<String>()) {
-
-            // tasks completes with exception
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testShutdownOnSuccess5(ThreadFactory factory) throws Exception {
+        try (var scope = new ShutdownOnSuccess<Object>(null, factory)) {
             scope.fork(() -> { throw new ArithmeticException(); });
             scope.join();
-
             Throwable ex = assertThrows(ExecutionException.class, () -> scope.result());
             assertTrue(ex.getCause() instanceof  ArithmeticException);
-
             ex = assertThrows(FooException.class, () -> scope.result(e -> new FooException(e)));
             assertTrue(ex.getCause() instanceof  ArithmeticException);
         }
     }
 
     /**
-     * Test ShutdownOnSuccess with a cancelled task.
+     * Test ShutdownOnSuccess methods are confined to the owner.
      */
-    @Test
-    void testShutdownOnSuccess5() throws Exception {
-        try (var scope = new ShutdownOnSuccess<String>()) {
-
-            // cancelled task
-            var future = scope.fork(() -> {
-                Thread.sleep(60_000);
-                return null;
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testShutdownOnSuccessConfined(ThreadFactory factory) throws Exception {
+        // owner before join
+        try (var scope = new ShutdownOnSuccess<Boolean>(null, factory)) {
+            scope.fork(() -> { throw new FooException(); });
+            assertThrows(IllegalStateException.class, scope::result);
+            assertThrows(IllegalStateException.class, () -> {
+                scope.result(e -> new RuntimeException(e));
             });
-            future.cancel(false);
-
             scope.join();
+        }
 
-            assertThrows(CancellationException.class, () -> scope.result());
-            Throwable ex = assertThrows(FooException.class,
-                                        () -> scope.result(e -> new FooException(e)));
-            assertTrue(ex.getCause() instanceof CancellationException);
+        // non-owner
+        try (var scope = new ShutdownOnSuccess<Boolean>(null, factory)) {
+            Subtask<Boolean> subtask = scope.fork(() -> {
+                assertThrows(WrongThreadException.class, scope::result);
+                assertThrows(WrongThreadException.class, () -> {
+                    scope.result(e -> new RuntimeException(e));
+                });
+                return true;
+            });
+            scope.join();
+            assertTrue(subtask.get());
         }
     }
 
@@ -1197,11 +1442,12 @@ class StructuredTaskScopeTest {
     }
 
     /**
-     * Test ShutdownOnFailure with tasks that completed normally.
+     * Test ShutdownOnFailure with tasks that complete successfully.
      */
-    @Test
-    void testShutdownOnFailure2() throws Throwable {
-        try (var scope = new ShutdownOnFailure()) {
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testShutdownOnFailure2(ThreadFactory factory) throws Throwable {
+        try (var scope = new ShutdownOnFailure(null, factory)) {
             scope.fork(() -> "foo");
             scope.fork(() -> "bar");
             scope.join();
@@ -1214,13 +1460,14 @@ class StructuredTaskScopeTest {
     }
 
     /**
-     * Test ShutdownOnFailure with tasks that completed normally and abnormally.
+     * Test ShutdownOnFailure with tasks that complete succcessfully and tasks that fail.
      */
-    @Test
-    void testShutdownOnFailure3() throws Throwable {
-        try (var scope = new ShutdownOnFailure()) {
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testShutdownOnFailure3(ThreadFactory factory) throws Throwable {
+        try (var scope = new ShutdownOnFailure(null, factory)) {
 
-            // one task completes normally, the other with an exception
+            // one task completes successfully, the other fails
             scope.fork(() -> "foo");
             scope.fork(() -> { throw new ArithmeticException(); });
             scope.join();
@@ -1238,28 +1485,60 @@ class StructuredTaskScopeTest {
     }
 
     /**
-     * Test ShutdownOnFailure with a cancelled task.
+     * Test ShutdownOnFailure methods are confined to the owner.
+     */
+    @ParameterizedTest
+    @MethodSource("factories")
+    void testShutdownOnFailureConfined(ThreadFactory factory) throws Exception {
+        // owner before join
+        try (var scope = new ShutdownOnFailure(null, factory)) {
+            scope.fork(() -> "foo");
+            assertThrows(IllegalStateException.class, scope::exception);
+            assertThrows(IllegalStateException.class, scope::throwIfFailed);
+            assertThrows(IllegalStateException.class, () -> {
+                scope.throwIfFailed(e -> new RuntimeException(e));
+            });
+            scope.join();
+        }
+
+        // non-owner
+        try (var scope = new ShutdownOnFailure(null, factory)) {
+            Subtask<Boolean> subtask = scope.fork(() -> {
+                assertThrows(WrongThreadException.class, scope::exception);
+                assertThrows(WrongThreadException.class, scope::throwIfFailed);
+                assertThrows(WrongThreadException.class, () -> {
+                    scope.throwIfFailed(e -> new RuntimeException(e));
+                });
+                return true;
+            });
+            scope.join();
+            assertTrue(subtask.get());
+        }
+    }
+
+    /**
+     * Test for NullPointerException.
      */
     @Test
-    void testShutdownOnFailure4() throws Throwable {
+    void testNulls() throws Exception {
+        assertThrows(NullPointerException.class, () -> new StructuredTaskScope("", null));
+        try (var scope = new StructuredTaskScope<Object>()) {
+            assertThrows(NullPointerException.class, () -> scope.fork(null));
+            assertThrows(NullPointerException.class, () -> scope.joinUntil(null));
+        }
+
+        assertThrows(NullPointerException.class, () -> new ShutdownOnSuccess<Object>("", null));
+        try (var scope = new ShutdownOnSuccess<Object>()) {
+            assertThrows(NullPointerException.class, () -> scope.fork(null));
+            assertThrows(NullPointerException.class, () -> scope.joinUntil(null));
+            assertThrows(NullPointerException.class, () -> scope.result(null));
+        }
+
+        assertThrows(NullPointerException.class, () -> new ShutdownOnFailure("", null));
         try (var scope = new ShutdownOnFailure()) {
-
-            var future = scope.fork(() -> {
-                Thread.sleep(60_000);
-                return null;
-            });
-            future.cancel(false);
-
-            scope.join();
-
-            Throwable ex = scope.exception().orElse(null);
-            assertTrue(ex instanceof CancellationException);
-
-            assertThrows(CancellationException.class, () -> scope.throwIfFailed());
-
-            ex = assertThrows(FooException.class,
-                              () -> scope.throwIfFailed(e -> new FooException(e)));
-            assertTrue(ex.getCause() instanceof CancellationException);
+            assertThrows(NullPointerException.class, () -> scope.fork(null));
+            assertThrows(NullPointerException.class, () -> scope.joinUntil(null));
+            assertThrows(NullPointerException.class, () -> scope.throwIfFailed(null));
         }
     }
 
