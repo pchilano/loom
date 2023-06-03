@@ -28,7 +28,9 @@
 #include "memory/allocation.hpp"
 #include "memory/padded.hpp"
 #include "oops/markWord.hpp"
+#include "oops/oopHandle.inline.hpp"
 #include "oops/weakHandle.hpp"
+#include "runtime/javaThread.hpp"
 #include "runtime/perfDataTypes.hpp"
 
 class ObjectMonitor;
@@ -161,6 +163,7 @@ private:
   static void* anon_owner_ptr() { return reinterpret_cast<void*>(ANONYMOUS_OWNER); }
 
   void* volatile _owner;            // pointer to owning thread OR BasicLock
+  OopHandle      _cont;             // continuation where lock was acquired (set on continuation freeze only)
   volatile uint64_t _previous_owner_tid;  // thread id of the previous owner of the monitor
   // Separate _owner and _next_om on different cache lines since
   // both can have busy multi-threaded access. _previous_owner_tid is only
@@ -190,6 +193,7 @@ private:
   volatile int  _waiters;           // number of waiting threads
  private:
   volatile int _WaitSetLock;        // protects Wait Queue - simple spinlock
+  bool _slowpath_on_last_exit;
 
  public:
 
@@ -224,6 +228,7 @@ private:
   static int cxq_offset_in_bytes()         { return offset_of(ObjectMonitor, _cxq); }
   static int succ_offset_in_bytes()        { return offset_of(ObjectMonitor, _succ); }
   static int EntryList_offset_in_bytes()   { return offset_of(ObjectMonitor, _EntryList); }
+  static int slowpath_on_last_exit_offset_in_bytes()   { return offset_of(ObjectMonitor, _slowpath_on_last_exit); }
 
   // ObjectMonitor references can be ORed with markWord::monitor_value
   // as part of the ObjectMonitor tagging mechanism. When we combine an
@@ -289,6 +294,21 @@ private:
   void set_owner_from_anonymous(Thread* owner) {
     set_owner_from(anon_owner_ptr(), owner);
   }
+
+  bool has_continuation_owner() { return !_cont.is_empty(); }
+  oop  continuation_owner()     { return _cont.resolve(); }
+  void set_continuation_owner(void* owner, oop continuation) {
+    _cont = OopHandle(JavaThread::thread_oop_storage(), continuation);
+    set_owner_from(owner, anon_owner_ptr());
+  }
+  void clear_continuation_owner(JavaThread* thread) {
+    set_owner_from_anonymous(thread);
+    _cont.release(JavaThread::thread_oop_storage());
+    _cont = OopHandle();
+  }
+
+  bool slowpath_on_last_exit()             { return _slowpath_on_last_exit; }
+  void set_slowpath_on_last_exit(bool val) { _slowpath_on_last_exit = val; }
 
   // Simply get _next_om field.
   ObjectMonitor* next_om() const;

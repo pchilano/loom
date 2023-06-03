@@ -394,6 +394,14 @@ bool ObjectSynchronizer::quick_enter(oop obj, JavaThread* current,
     if (m->object_peek() == nullptr) {
       return false;
     }
+
+    if (m->has_continuation_owner() && current->last_continuation() != nullptr) {
+      if (m->continuation_owner() == current->last_continuation()->cont_oop(current)) {
+        m->_recursions++;
+        return true;
+      }
+    }
+
     JavaThread* const owner = static_cast<JavaThread*>(m->owner_raw());
 
     // Lock contention and Transactional Lock Elision (TLE) diagnostics
@@ -403,7 +411,6 @@ bool ObjectSynchronizer::quick_enter(oop obj, JavaThread* current,
 
     if (owner == current) {
       m->_recursions++;
-      current->inc_held_monitor_count();
       return true;
     }
 
@@ -540,6 +547,7 @@ void ObjectSynchronizer::enter(Handle obj, BasicLock* lock, JavaThread* current)
         assert(lock != mark.locker(), "must not re-lock the same lock");
         assert(lock != (BasicLock*) obj->mark().value(), "don't relock with same BasicLock");
         lock->set_displaced_header(markWord::from_pointer(nullptr));
+        current->dec_held_monitor_count();
         return;
       }
 
@@ -558,6 +566,15 @@ void ObjectSynchronizer::enter(Handle obj, BasicLock* lock, JavaThread* current)
   // we have lost the race to async deflation and we simply try again.
   while (true) {
     ObjectMonitor* monitor = inflate(current, obj(), inflate_cause_monitor_enter);
+    if (monitor->has_continuation_owner() && current->last_continuation() != nullptr) {
+      if (monitor->continuation_owner() == current->last_continuation()->cont_oop(current)) {
+        // Recursive case
+        monitor->_recursions++;
+        // Compensate for the already executed increment.
+        current->dec_held_monitor_count();
+        return;
+      }
+    }
     if (monitor->enter(current)) {
       return;
     }
@@ -617,6 +634,7 @@ void ObjectSynchronizer::exit(oop object, BasicLock* lock, JavaThread* current) 
           }
         }
 #endif
+        current->inc_held_monitor_count();
         return;
       }
 
@@ -643,6 +661,22 @@ void ObjectSynchronizer::exit(oop object, BasicLock* lock, JavaThread* current) 
     oop popped = lock_stack.pop();
     assert(popped == object, "must be owned by this thread");
     monitor->set_owner_from_anonymous(current);
+  }
+  if (monitor->slowpath_on_last_exit()) {
+    if (monitor->recursions() == 0) {
+      // Last unlock, fix the monitor now
+      monitor->clear_continuation_owner(current);
+      monitor->set_slowpath_on_last_exit(false);
+      // Compensate for the already executed decrement.
+      current->inc_held_monitor_count();
+      // Falthough to exit() ...
+    } else {
+      // Recursive case
+      monitor->_recursions--;
+      // Compensate for the already executed decrement.
+      current->inc_held_monitor_count();
+      return;
+    }
   }
   monitor->exit(current);
 }

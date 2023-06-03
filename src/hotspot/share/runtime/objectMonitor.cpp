@@ -272,7 +272,8 @@ ObjectMonitor::ObjectMonitor(oop object) :
   _contentions(0),
   _WaitSet(nullptr),
   _waiters(0),
-  _WaitSetLock(0)
+  _WaitSetLock(0),
+  _slowpath_on_last_exit(false)
 { }
 
 ObjectMonitor::~ObjectMonitor() {
@@ -331,6 +332,8 @@ bool ObjectMonitor::enter(JavaThread* current) {
   if (cur == current) {
     // TODO-FIXME: check for integer overflow!  BUGID 6557169.
     _recursions++;
+    // Compensate for the already executed increment.
+    current->dec_held_monitor_count();
     return true;
   }
 
@@ -338,6 +341,8 @@ bool ObjectMonitor::enter(JavaThread* current) {
     assert(_recursions == 0, "internal state error");
     _recursions = 1;
     set_owner_from_BasicLock(cur, current);  // Convert from BasicLock* to Thread*.
+    // Compensate for the already executed increment.
+    current->dec_held_monitor_count();
     return true;
   }
 
@@ -1163,6 +1168,8 @@ void ObjectMonitor::exit(JavaThread* current, bool not_suspended) {
 
   if (_recursions != 0) {
     _recursions--;        // this is simple recursive enter
+    // Compensate for the already executed decrement.
+    current->inc_held_monitor_count();
     return;
   }
 
