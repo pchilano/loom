@@ -609,6 +609,7 @@ private:
 
   int64_t held_monitor_count() { return (int64_t)_held_monitor_count; }
   void clear_held_monitor_count() { _held_monitor_count = 0; }
+  void set_held_monitor_count(int val) { _held_monitor_count = val; }
   int64_t jni_monitor_count()  { return (int64_t)_jni_monitor_count;  }
   void clear_jni_monitor_count() { _jni_monitor_count = 0;   }
 
