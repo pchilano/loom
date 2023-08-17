@@ -388,6 +388,19 @@ bool ObjectMonitor::enter(JavaThread* current) {
     return false;
   }
 
+  ContinuationEntry* ce = current->last_continuation();
+  if (ce != nullptr && current->is_on_monitorenter()) {
+    // Try to avoid pinning and preempt continuation.
+    current->dec_held_monitor_count(); // Compensate for already incremented counter
+    int result = Continuation::try_preempt(current, ce->cont_oop(current));
+    if (result == freeze_ok) {
+      current->_Stalled = 0;
+      return true;
+    } else {
+      current->inc_held_monitor_count();
+    }
+  }
+
   JFR_ONLY(JfrConditionalFlushWithStacktrace<EventJavaMonitorEnter> flush(current);)
   EventJavaMonitorEnter event;
   if (event.is_started()) {
