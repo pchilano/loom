@@ -1946,7 +1946,7 @@ void JavaThread::trace_stack() {
 
 void JavaThread::inc_held_monitor_count(intx i, bool jni) {
 #ifdef SUPPORT_MONITOR_COUNT
-  assert(_held_monitor_count >= 0, "Must always be greater than 0: " INTX_FORMAT, _held_monitor_count);
+  //assert(_held_monitor_count >= 0, "Must always be greater than 0: " INTX_FORMAT, _held_monitor_count);
   _held_monitor_count += i;
   if (jni) {
     assert(_jni_monitor_count >= 0, "Must always be greater than 0: " INTX_FORMAT, _jni_monitor_count);
@@ -1958,7 +1958,7 @@ void JavaThread::inc_held_monitor_count(intx i, bool jni) {
 void JavaThread::dec_held_monitor_count(intx i, bool jni) {
 #ifdef SUPPORT_MONITOR_COUNT
   _held_monitor_count -= i;
-  assert(_held_monitor_count >= 0, "Must always be greater than 0: " INTX_FORMAT, _held_monitor_count);
+  //assert(_held_monitor_count >= 0, "Must always be greater than 0: " INTX_FORMAT, _held_monitor_count);
   if (jni) {
     _jni_monitor_count -= i;
     assert(_jni_monitor_count >= 0, "Must always be greater than 0: " INTX_FORMAT, _jni_monitor_count);

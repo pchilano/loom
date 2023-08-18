@@ -93,22 +93,36 @@ inline int ContinuationHelper::InterpretedFrame::expression_stack_size(const fra
 }
 
 #ifdef ASSERT
-inline bool ContinuationHelper::InterpretedFrame::is_owning_locks(const frame& f) {
-  assert(f.interpreter_frame_monitor_end() <= f.interpreter_frame_monitor_begin(), "must be");
-  if (f.interpreter_frame_monitor_end() == f.interpreter_frame_monitor_begin()) {
-    return false;
+inline int ContinuationHelper::InterpretedFrame::monitors_to_fix(const frame& f, ResourceHashtable<oopDesc*, bool> &table) {
+  BasicObjectLock* first_mon = f.interpreter_frame_monitor_begin();
+  BasicObjectLock* last_mon = f.interpreter_frame_monitor_end();
+  assert(last_mon <= first_mon, "must be");
+
+  if (first_mon == last_mon) {
+    return 0;
   }
 
-  for (BasicObjectLock* current = f.previous_monitor_in_interpreter_frame(f.interpreter_frame_monitor_begin());
-        current >= f.interpreter_frame_monitor_end();
-        current = f.previous_monitor_in_interpreter_frame(current)) {
+  int monitor_count = 0;
+  JavaThread* current = JavaThread::current();
 
-      oop obj = current->obj();
-      if (obj != nullptr) {
-        return true;
+  for (BasicObjectLock* current = f.previous_monitor_in_interpreter_frame(first_mon);
+       current >= last_mon; current = f.previous_monitor_in_interpreter_frame(current)) {
+    oop obj = current->obj();
+
+    if (obj != nullptr) {
+      markWord mark = obj->mark();
+      if (mark.has_monitor() && mark.monitor()->has_continuation_owner()) {
+        // already fixed
+        continue;
       }
+      bool created;
+      table.put_if_absent(obj, true, &created);
+      if (created) {
+        monitor_count++;
+      }
+    }
   }
-  return false;
+  return monitor_count;
 }
 #endif
 
@@ -143,7 +157,7 @@ inline bool ContinuationHelper::CompiledFrame::is_instance(const frame& f) {
 
 #ifdef ASSERT
 template<typename RegisterMapT>
-bool ContinuationHelper::CompiledFrame::is_owning_locks(JavaThread* thread, RegisterMapT* map, const frame& f) {
+int ContinuationHelper::CompiledFrame::monitors_to_fix(JavaThread* thread, RegisterMapT* map, const frame& f, ResourceHashtable<oopDesc*, bool> &table) {
   assert(!f.is_interpreted_frame(), "");
   assert(CompiledFrame::is_instance(f), "");
 
@@ -151,11 +165,12 @@ bool ContinuationHelper::CompiledFrame::is_owning_locks(JavaThread* thread, Regi
   assert(!cm->is_compiled() || !cm->as_compiled_method()->is_native_method(), ""); // See compiledVFrame::compiledVFrame(...) in vframe_hp.cpp
 
   if (!cm->has_monitors()) {
-    return false;
+    return 0;
   }
 
-  frame::update_map_with_saved_link(map, Frame::callee_link_address(f)); // the monitor object could be stored in the link register
-  ResourceMark rm;
+  int monitor_count = 0;
+  JavaThread* current = JavaThread::current();
+
   for (ScopeDesc* scope = cm->scope_desc_at(f.pc()); scope != nullptr; scope = scope->sender()) {
     GrowableArray<MonitorValue*>* mons = scope->monitors();
     if (mons == nullptr || mons->is_empty()) {
@@ -171,12 +186,21 @@ bool ContinuationHelper::CompiledFrame::is_owning_locks(JavaThread* thread, Regi
       StackValue* owner_sv = StackValue::create_stack_value(&f, map, ov); // it is an oop
       oop owner = owner_sv->get_obj()();
       if (owner != nullptr) {
-        //assert(cm->has_monitors(), "");
-        return true;
+        markWord mark = owner->mark();
+        mark.has_monitor();
+        if (mark.has_monitor() && mark.monitor()->has_continuation_owner()) {
+          // already fixed
+          continue;
+        }
+        bool created;
+        table.put_if_absent(owner, true, &created);
+        if (created) {
+          monitor_count++;
+        }
       }
     }
   }
-  return false;
+  return monitor_count;
 }
 #endif
 

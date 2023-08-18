@@ -235,7 +235,7 @@ StackValue *compiledVFrame::create_stack_value(ScopeValue *sv) const {
 }
 
 BasicLock* compiledVFrame::resolve_monitor_lock(Location location) const {
-  return StackValue::resolve_monitor_lock(&_fr, location);
+  return StackValue::resolve_monitor_lock(stack_chunk() == nullptr ? _fr : stack_chunk()->derelativize(_fr), location);
 }
 
 
@@ -280,6 +280,11 @@ GrowableArray<MonitorInfo*>* compiledVFrame::monitors() const {
       result->push(new MonitorInfo(owner_sv->get_obj()(), resolve_monitor_lock(mv->basic_lock()),
                                    mv->eliminated(), false));
     }
+  }
+
+  if (stack_chunk() != nullptr) {
+    // No support for deferred values in continuations
+    return result;
   }
 
   // Replace the original values with any stores that have been
