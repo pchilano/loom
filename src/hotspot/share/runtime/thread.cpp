@@ -266,7 +266,7 @@ Thread::~Thread() {
   delete handle_area();
   delete metadata_handles();
 
-  // osthread() can be nullptr, if creation of thread failed.
+  // osthread() can be null, if creation of thread failed.
   if (osthread() != nullptr) os::free_thread(osthread());
 
   // Clear Thread::current if thread is deleting itself and it has not
@@ -450,10 +450,10 @@ void Thread::print_on(outputStream* st, bool print_extended_info) const {
     }
 
     st->print("cpu=%.2fms ",
-              os::thread_cpu_time(const_cast<Thread*>(this), true) / 1000000.0
+              (double)os::thread_cpu_time(const_cast<Thread*>(this), true) / 1000000.0
               );
     st->print("elapsed=%.2fs ",
-              _statistical_info.getElapsedTime() / 1000.0
+              (double)_statistical_info.getElapsedTime() / 1000.0
               );
     if (is_Java_thread() && (PrintExtendedThreadInfo || print_extended_info)) {
       size_t allocated_bytes = (size_t) const_cast<Thread*>(this)->cooked_allocated_bytes();

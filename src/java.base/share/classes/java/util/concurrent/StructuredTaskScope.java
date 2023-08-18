@@ -59,7 +59,7 @@ import jdk.internal.misc.ThreadFlock;
  * used to get the result completed successfully, or the exception if the subtask failed.
  * {@snippet lang=java :
  *     Callable<String> task1 = ...
- *     Callable<Integer> task1 = ...
+ *     Callable<Integer> task2 = ...
  *
  *     try (var scope = new StructuredTaskScope<Object>()) {
  *
@@ -156,7 +156,7 @@ import jdk.internal.misc.ThreadFlock;
  * if either subtask fails. This method is a no-op if both subtasks complete successfully.
  * The example uses {@link Supplier#get()} to get the result of each subtask. Using
  * {@code Supplier} instead of {@code Subtask} is preferred for common cases where the
- * the object returned by fork is only used to get the result of a subtask that completed
+ * object returned by fork is only used to get the result of a subtask that completed
  * successfully.
  * {@snippet lang=java :
  *    Instant deadline = ...
@@ -304,9 +304,6 @@ public class StructuredTaskScope<T> implements AutoCloseable {
     private final ThreadFlock flock;
     private final ReentrantLock shutdownLock = new ReentrantLock();
 
-    // set by owner when it forks, reset by owner when it joins
-    private boolean needJoin;
-
     // states: OPEN -> SHUTDOWN -> CLOSED
     private static final int OPEN     = 0;   // initial state
     private static final int SHUTDOWN = 1;
@@ -314,6 +311,13 @@ public class StructuredTaskScope<T> implements AutoCloseable {
 
     // state: set to SHUTDOWN by any thread, set to CLOSED by owner, read by any thread
     private volatile int state;
+
+    // Counters to support checking that the task scope owner joins before processing
+    // results and attempts join before closing the task scope. These counters are
+    // accessed only by the owner thread.
+    private int forkRound;         // incremented when the first subtask is forked after join
+    private int lastJoinAttempted; // set to the current fork round when join is attempted
+    private int lastJoinCompleted; // set to the current fork round when join completes
 
     /**
      * Represents a subtask forked with {@link #fork(Callable)}.
@@ -324,6 +328,9 @@ public class StructuredTaskScope<T> implements AutoCloseable {
     public sealed interface Subtask<T> extends Supplier<T> permits SubtaskImpl {
         /**
          * {@return the value returning task provided to the {@code fork} method}
+         *
+         * @apiNote Task objects with unique identity may be used for correlation by
+         * implementations of {@link #handleComplete(Subtask) handleComplete}.
          */
         Callable<? extends T> task();
 
@@ -335,25 +342,24 @@ public class StructuredTaskScope<T> implements AutoCloseable {
         @PreviewFeature(feature = PreviewFeature.Feature.STRUCTURED_CONCURRENCY)
         enum State {
             /**
-             * The subtask was forked but has not completed.
+             * The subtask result or exception is not available. This state indicates that
+             * the subtask was forked but has not completed, it completed after the task
+             * scope was {@linkplain #shutdown() shut down}, or it was forked after the
+             * task scope was shut down.
              */
-            RUNNING,
+            UNAVAILABLE,
             /**
-             * The subtask completed successfully with a result. This is a terminal state.
-             * @see Subtask#get()
+             * The subtask completed successfully with a result. The {@link Subtask#get()
+             * Subtask.get()} method can be used to obtain the result. This is a terminal
+             * state.
              */
             SUCCESS,
             /**
-             * The subtask failed with an exception. This is a terminal state.
-             * @see Subtask#exception()
+             * The subtask failed with an exception. The {@link Subtask#exception()
+             * Subtask.exception()} method can be used to obtain the exception. This is a
+             * terminal state.
              */
             FAILED,
-            /**
-             * The subtask did not run because it was {@linkplain #fork(Callable) forked}
-             * after the scope was {@linkplain StructuredTaskScope#shutdown() shut down}.
-             * This is a terminal state.
-             */
-            NOT_RUN
         }
 
         /**
@@ -363,20 +369,29 @@ public class StructuredTaskScope<T> implements AutoCloseable {
 
         /**
          * Returns the result of the subtask.
+         *
+         * <p> To ensure correct usage, if the scope owner {@linkplain #fork(Callable) forks}
+         * a subtask, then it must join (with {@link #join() join} or {@link #joinUntil(Instant)
+         * joinUntil}) before it can obtain the result of the subtask.
+         *
          * @return the possibly-null result
-         * @throws IllegalStateException if the subtask has not completed, did not
-         * complete successfully, or the current thread is the task scope owner and did
-         * not join after forking
+         * @throws IllegalStateException if the subtask has not completed, did not complete
+         * successfully, or the current thread is the task scope owner and did not join
+         * after forking
          * @see State#SUCCESS
          */
         T get();
 
         /**
-         * {@return the exception thrown by the subtask}. Returns a {@link
-         * CancellationException} if the subtask did {@linkplain State#NOT_RUN not run}.
+         * {@return the exception thrown by the subtask}
+         *
+         * <p> To ensure correct usage, if the scope owner {@linkplain #fork(Callable) forks}
+         * a subtask, then it must join (with {@link #join() join} or {@link #joinUntil(Instant)
+         * joinUntil}) before it can obtain the exception thrown by the subtask.
+         *
          * @throws IllegalStateException if the subtask has not completed, completed with
-         * a result, or the current thread is the task scope owner and did not invoke join
-         * after forking
+         * a result, or the current thread is the task scope owner and did not join after
+         * forking
          * @see State#FAILED
          */
         Throwable exception();
@@ -421,7 +436,7 @@ public class StructuredTaskScope<T> implements AutoCloseable {
     }
 
     private IllegalStateException newIllegalStateExceptionNoJoin() {
-        return new IllegalStateException("Owner did not invoke join or joinUntil after fork");
+        return new IllegalStateException("Owner did not join after forking subtasks");
     }
 
     /**
@@ -454,37 +469,38 @@ public class StructuredTaskScope<T> implements AutoCloseable {
     }
 
     /**
-     * Throws IllegalStateException if the current thread is the owner and it did
-     * not invoke join after forking
+     * Throws IllegalStateException if the current thread is the owner, and the owner did
+     * not join after forking a subtask in the given fork round.
      */
-    private void ensureJoinedIfOwner() {
-        if (Thread.currentThread() == flock.owner() && needJoin) {
+    private void ensureJoinedIfOwner(int round) {
+        if (Thread.currentThread() == flock.owner() && (round > lastJoinCompleted)) {
             throw newIllegalStateExceptionNoJoin();
         }
     }
 
     /**
-     * Ensures that the current thread is the owner of this task scope and that the
-     * {@link #join()} or {@link #joinUntil(Instant)} method has been called after
-     * {@linkplain #fork(Callable) forking}.
+     * Ensures that the current thread is the owner of this task scope and that it joined
+     * (with {@link #join()} or {@link #joinUntil(Instant)}) after {@linkplain #fork(Callable)
+     * forking} subtasks.
      *
      * @apiNote This method can be used by subclasses that define methods to make available
      * results, state, or other outcome to code intended to execute after the join method.
      *
      * @throws WrongThreadException if the current thread is not the task scope owner
      * @throws IllegalStateException if the task scope is open and task scope owner did
-     * not invoke join after forking
+     * not join after forking
      */
     protected final void ensureOwnerAndJoined() {
         ensureOwner();
-        if (needJoin) {
+        if (forkRound > lastJoinCompleted) {
             throw newIllegalStateExceptionNoJoin();
         }
     }
 
     /**
-     * Invoked by a subtask when it completes successfully or fails in this task scope. It
-     * is also invoked for subtasks that did {@linkplain Subtask.State#NOT_RUN not run}.
+     * Invoked by a subtask when it completes successfully or fails in this task scope.
+     * This method is not invoked if a subtask completes after the task scope is
+     * {@linkplain #shutdown() shut down}.
      *
      * @implSpec The default implementation throws {@code NullPointerException} if the
      * subtask is {@code null}. It throws {@link IllegalArgumentException} if the subtask
@@ -498,7 +514,7 @@ public class StructuredTaskScope<T> implements AutoCloseable {
      * @throws IllegalArgumentException if called with a subtask that has not completed
      */
     protected void handleComplete(Subtask<? extends T> subtask) {
-        if (subtask.state() == Subtask.State.RUNNING)
+        if (subtask.state() == Subtask.State.UNAVAILABLE)
             throw new IllegalArgumentException();
     }
 
@@ -512,7 +528,7 @@ public class StructuredTaskScope<T> implements AutoCloseable {
      * {@linkplain ScopedValue scoped value} bindings. The bindings must match the bindings
      * captured when the task scope was created.
      *
-     * <p> This method returns a {@link Subtask Subtask}to represent the <em>forked
+     * <p> This method returns a {@link Subtask Subtask} to represent the <em>forked
      * subtask</em>. The {@code Subtask} object can be used to obtain the result when
      * the subtask completes successfully, or the exception when the subtask fails. To
      * ensure correct usage, the {@link Subtask#get() get()} and {@link Subtask#exception()
@@ -520,11 +536,12 @@ public class StructuredTaskScope<T> implements AutoCloseable {
      * for all threads to finish with the {@link #join() join} or {@link #joinUntil(Instant)}
      * methods. When the subtask completes, the thread invokes the {@link
      * #handleComplete(Subtask) handleComplete} method to consume the completed subtask.
+     * If the task scope is {@linkplain #shutdown() shut down} before the subtask completes
+     * then the {@code handleComplete} method will not be invoked.
      *
-     * <p> If this task scope is {@linkplain #shutdown() shutdown} (or in the process
-     * of shutting down) then the subtask will not run. In that case, this method returns
-     * a {@code Subtask} representing a subtask that did {@linkplain Subtask.State#NOT_RUN
-     * not run}. The {@code handleComplete} method is invoked.
+     * <p> If this task scope is {@linkplain #shutdown() shutdown} (or in the process of
+     * shutting down) then the subtask will not run and the {@code handleComplete} method
+     * will not be invoked.
      *
      * <p> This method may only be invoked by the task scope owner or threads contained
      * in the task scope.
@@ -548,7 +565,17 @@ public class StructuredTaskScope<T> implements AutoCloseable {
         Objects.requireNonNull(task, "'task' is null");
         int s = ensureOpen();   // throws ISE if closed
 
-        SubtaskImpl<U> subtask = new SubtaskImpl<>(this, task);
+        // when forked by the owner, the subtask is forked in the current or next round
+        int round = -1;
+        if (Thread.currentThread() == flock.owner()) {
+            round = forkRound;
+            if (forkRound == lastJoinCompleted) {
+                // new round if first fork after join
+                round++;
+            }
+        }
+
+        SubtaskImpl<U> subtask = new SubtaskImpl<>(this, task, round);
         boolean started = false;
 
         if (s < SHUTDOWN) {
@@ -568,11 +595,9 @@ public class StructuredTaskScope<T> implements AutoCloseable {
             }
         }
 
-        if (!started) {
-            subtask.cancelUnstarted();
-        } else if (Thread.currentThread() == flock.owner() && !needJoin) {
-            // force owner to join
-            needJoin = true;
+        // force owner to join if thread started
+        if (started && Thread.currentThread() == flock.owner() && round > forkRound) {
+            forkRound = round;
         }
 
         // return forked subtask or a subtask that did not run
@@ -586,24 +611,27 @@ public class StructuredTaskScope<T> implements AutoCloseable {
         throws InterruptedException, TimeoutException
     {
         ensureOwner();
+        lastJoinAttempted = forkRound;
         int s = ensureOpen();  // throws ISE if closed
-        needJoin = false;
-        if (s != OPEN)
-            return;
-
-        // wait for all threads, wakeup, interrupt, or timeout
-        if (timeout != null) {
-            flock.awaitAll(timeout);
-        } else {
-            flock.awaitAll();
+        if (s == OPEN) {
+            // wait for all threads, wakeup, interrupt, or timeout
+            if (timeout != null) {
+                flock.awaitAll(timeout);
+            } else {
+                flock.awaitAll();
+            }
         }
+        lastJoinCompleted = forkRound;
     }
 
     /**
-     * Wait for all threads in this task scope to finish or the task scope to shut down.
-     * This method waits until all threads started in this task scope finish execution,
-     * the {@link #shutdown() shutdown} method is invoked to shut down the task scope,
-     * or the current thread is {@linkplain Thread#interrupt() interrupted}.
+     * Wait for all subtasks started in this task scope to finish or the task scope to
+     * shut down.
+     *
+     * <p> This method waits for all subtasks by waiting for all threads {@linkplain
+     * #fork(Callable) started} in this task scope to finish execution. It stops waiting
+     * when all threads finish, the task scope is {@linkplain #shutdown() shut down}, or
+     * the current thread is {@linkplain Thread#interrupt() interrupted}.
      *
      * <p> This method may only be invoked by the task scope owner.
      *
@@ -627,11 +655,14 @@ public class StructuredTaskScope<T> implements AutoCloseable {
     }
 
     /**
-     * Wait for all threads in this task scope to finish or the task scope to shut down,
-     * up to the given deadline. This method waits until all threads started in the task
-     * scope finish execution, the {@link #shutdown() shutdown} method is invoked to
-     * shut down the task scope, the current thread is {@linkplain Thread#interrupt()
-     * interrupted}, or the deadline is reached.
+     * Wait for all subtasks started in this task scope to finish or the task scope to
+     * shut down, up to the given deadline.
+     *
+     * <p> This method waits for all subtasks by waiting for all threads {@linkplain
+     * #fork(Callable) started} in this task scope to finish execution. It stops waiting
+     * when all threads finish, the task scope is {@linkplain #shutdown() shut down}, the
+     * deadline is reached, or the current thread is {@linkplain Thread#interrupt()
+     * interrupted}.
      *
      * <p> This method may only be invoked by the task scope owner.
      *
@@ -754,7 +785,7 @@ public class StructuredTaskScope<T> implements AutoCloseable {
      * {@return true if this task scope is shutdown, otherwise false}
      * @see #shutdown()
      */
-    public boolean isShutdown() {
+    public final boolean isShutdown() {
         return state >= SHUTDOWN;
     }
 
@@ -788,7 +819,7 @@ public class StructuredTaskScope<T> implements AutoCloseable {
      * the subclass must invoke {@code super.close} to close the task scope.
      *
      * @throws IllegalStateException thrown after closing the task scope if the task scope
-     * owner did not invoke join after forking
+     * owner did not attempt to join after forking
      * @throws WrongThreadException if the current thread is not the task scope owner
      * @throws StructureViolationException if a structure violation was detected
      */
@@ -807,8 +838,9 @@ public class StructuredTaskScope<T> implements AutoCloseable {
             state = CLOSED;
         }
 
-        if (needJoin) {
-            needJoin = false;
+        // throw ISE if the owner didn't attempt to join after forking
+        if (forkRound > lastJoinAttempted) {
+            lastJoinCompleted = forkRound;
             throw newIllegalStateExceptionNoJoin();
         }
     }
@@ -829,42 +861,45 @@ public class StructuredTaskScope<T> implements AutoCloseable {
      */
     private static final class SubtaskImpl<T> implements Subtask<T>, Runnable {
         private static final AltResult RESULT_NULL = new AltResult(Subtask.State.SUCCESS);
-        private static final AltResult RESULT_NOT_RUN = new AltResult(State.NOT_RUN);
 
         private record AltResult(Subtask.State state, Throwable exception) {
             AltResult(Subtask.State state) {
                 this(state, null);
             }
-            AltResult(Throwable ex) {
-                this(Subtask.State.FAILED, ex);
-            }
         }
 
         private final StructuredTaskScope<? super T> scope;
         private final Callable<? extends T> task;
+        private final int round;
         private volatile Object result;
 
-        SubtaskImpl(StructuredTaskScope<? super T> scope, Callable<? extends T> task) {
+        SubtaskImpl(StructuredTaskScope<? super T> scope,
+                    Callable<? extends T> task,
+                    int round) {
             this.scope = scope;
             this.task = task;
-        }
-
-        /**
-         * Task did not start.
-         */
-        void cancelUnstarted() {
-            assert result == null;
-            result = RESULT_NOT_RUN;
-            scope.handleComplete(this);
+            this.round = round;
         }
 
         @Override
         public void run() {
+            T result = null;
+            Throwable ex = null;
             try {
-                T value = task.call();
-                result = (value != null) ? value : RESULT_NULL;
-            } catch (Throwable ex) {
-                result = new AltResult(ex);
+                result = task.call();
+            } catch (Throwable e) {
+                ex = e;
+            }
+
+            // nothing to do if task scope is shutdown
+            if (scope.isShutdown())
+                return;
+
+            // capture result or exception, invoke handleComplete
+            if (ex == null) {
+                this.result = (result != null) ? result : RESULT_NULL;
+            } else {
+                this.result = new AltResult(State.FAILED, ex);
             }
             scope.handleComplete(this);
         }
@@ -878,18 +913,18 @@ public class StructuredTaskScope<T> implements AutoCloseable {
         public Subtask.State state() {
             Object result = this.result;
             if (result == null) {
-                return Subtask.State.RUNNING;
+                return State.UNAVAILABLE;
             } else if (result instanceof AltResult alt) {
-                // null, failed or did not run
+                // null or failed
                 return alt.state();
             } else {
-                return Subtask.State.SUCCESS;
+                return State.SUCCESS;
             }
         }
 
         @Override
         public T get() {
-            scope.ensureJoinedIfOwner();
+            scope.ensureJoinedIfOwner(round);
             Object result = this.result;
             if (result instanceof AltResult) {
                 if (result == RESULT_NULL) return null;
@@ -898,46 +933,47 @@ public class StructuredTaskScope<T> implements AutoCloseable {
                 T r = (T) result;
                 return r;
             }
-            throw new IllegalStateException("Task not completed or did not complete successfully");
+            throw new IllegalStateException("Subtask not completed or did not complete successfully");
         }
 
         @Override
         public Throwable exception() {
-            scope.ensureJoinedIfOwner();
-            if (result instanceof AltResult alt) {
-                if (alt.state() == State.FAILED)
-                    return alt.exception();
-                if (alt.state() == State.NOT_RUN)
-                    return new CancellationException();
+            scope.ensureJoinedIfOwner(round);
+            Object result = this.result;
+            if (result instanceof AltResult alt && alt.state() == State.FAILED) {
+                return alt.exception();
             }
-            throw new IllegalStateException("Task not completed or completed successfully");
+            throw new IllegalStateException("Subtask not completed or did not complete with exception");
         }
 
         @Override
         public String toString() {
             String stateAsString = switch (state()) {
-                case RUNNING   -> "[Not completed]";
-                case SUCCESS   -> "[Completed successfully]";
-                case FAILED    -> {
+                case UNAVAILABLE -> "[Unavailable]";
+                case SUCCESS     -> "[Completed successfully]";
+                case FAILED      -> {
                     Throwable ex = ((AltResult) result).exception();
                     yield "[Failed: " + ex + "]";
                 }
-                case NOT_RUN -> "[Not run]";
             };
-            return Objects.toIdentityString(this ) + stateAsString;
+            return Objects.toIdentityString(this) + stateAsString;
         }
     }
 
     /**
      * A {@code StructuredTaskScope} that captures the result of the first subtask to
      * complete {@linkplain Subtask.State#SUCCESS successfully}. Once captured, it
-     * invokes the {@linkplain #shutdown() shutdown} method to interrupt unfinished threads
+     * {@linkplain #shutdown() shuts down} the task scope to interrupt unfinished threads
      * and wakeup the task scope owner. The policy implemented by this class is intended
      * for cases where the result of any subtask will do ("invoke any") and where the
      * results of other unfinished subtasks are no longer needed.
      *
      * <p> Unless otherwise specified, passing a {@code null} argument to a method
      * in this class will cause a {@link NullPointerException} to be thrown.
+     *
+     * @apiNote This class implements a policy to shut down the task scope when a subtask
+     * completes successfully. There shouldn't be any need to directly shut down the task
+     * scope with the {@link #shutdown() shutdown} method.
      *
      * @param <T> the result type
      * @since 21
@@ -989,16 +1025,8 @@ public class StructuredTaskScope<T> implements AutoCloseable {
             this(null, Thread.ofVirtual().factory());
         }
 
-        /**
-         * Shut down this task scope when invoked for the first time with a subtask that
-         * completed {@linkplain Subtask.State#SUCCESS successfully}.
-         *
-         * @throws IllegalArgumentException {@inheritDoc}
-         */
         @Override
         protected void handleComplete(Subtask<? extends T> subtask) {
-            super.handleComplete(subtask);
-
             if (firstResult != null) {
                 // already captured a result
                 return;
@@ -1018,8 +1046,18 @@ public class StructuredTaskScope<T> implements AutoCloseable {
         }
 
         /**
-         * {@inheritDoc}
-         * @return this task scope
+         * Wait for a subtask started in this task scope to complete {@linkplain
+         * Subtask.State#SUCCESS successfully} or all subtasks to complete.
+         *
+         * <p> This method waits for all subtasks by waiting for all threads {@linkplain
+         * #fork(Callable) started} in this task scope to finish execution. It stops waiting
+         * when all threads finish, a subtask completes successfully, or the current
+         * thread is {@linkplain Thread#interrupt() interrupted}. It also stops waiting
+         * if the {@link #shutdown() shutdown} method is invoked directly to shut down
+         * this task scope.
+         *
+         * <p> This method may only be invoked by the task scope owner.
+         *
          * @throws IllegalStateException {@inheritDoc}
          * @throws WrongThreadException {@inheritDoc}
          */
@@ -1030,8 +1068,19 @@ public class StructuredTaskScope<T> implements AutoCloseable {
         }
 
         /**
-         * {@inheritDoc}
-         * @return this task scope
+         * Wait for a subtask started in this task scope to complete {@linkplain
+         * Subtask.State#SUCCESS successfully} or all subtasks to complete, up to the
+         * given deadline.
+         *
+         * <p> This method waits for all subtasks by waiting for all threads {@linkplain
+         * #fork(Callable) started} in this task scope to finish execution. It stops waiting
+         * when all threads finish, a subtask completes successfully, the deadline is
+         * reached, or the current thread is {@linkplain Thread#interrupt() interrupted}.
+         * It also stops waiting if the {@link #shutdown() shutdown} method is invoked
+         * directly to shut down this task scope.
+         *
+         * <p> This method may only be invoked by the task scope owner.
+         *
          * @throws IllegalStateException {@inheritDoc}
          * @throws WrongThreadException {@inheritDoc}
          */
@@ -1053,28 +1102,12 @@ public class StructuredTaskScope<T> implements AutoCloseable {
          *
          * @throws ExecutionException if no subtasks completed successfully but at least
          * one subtask failed
-         * @throws IllegalStateException if the handleComplete method was not invoked with
-         * a completed subtask, or the task scope owner did not invoke join after forking
+         * @throws IllegalStateException if no subtasks completed or the task scope owner
+         * did not join after forking
          * @throws WrongThreadException if the current thread is not the task scope owner
          */
         public T result() throws ExecutionException {
-            ensureOwnerAndJoined();
-
-            Object result = firstResult;
-            if (result == RESULT_NULL) {
-                return null;
-            } else if (result != null) {
-                @SuppressWarnings("unchecked")
-                T r = (T) result;
-                return r;
-            }
-
-            Throwable ex = firstException;
-            if (ex != null) {
-                throw new ExecutionException(ex);
-            }
-
-            throw new IllegalStateException("No completed subtasks");
+            return result(ExecutionException::new);
         }
 
         /**
@@ -1091,8 +1124,8 @@ public class StructuredTaskScope<T> implements AutoCloseable {
          * @return the result of the first subtask that completed with a result
          *
          * @throws X if no subtasks completed successfully but at least one subtask failed
-         * @throws IllegalStateException if the handleComplete method was not invoked with
-         * a completed subtask, or the task scope owner did not invoke join after forking
+         * @throws IllegalStateException if no subtasks completed or the task scope owner
+         * did not join after forking
          * @throws WrongThreadException if the current thread is not the task scope owner
          */
         public <X extends Throwable> T result(Function<Throwable, ? extends X> esf) throws X {
@@ -1121,14 +1154,18 @@ public class StructuredTaskScope<T> implements AutoCloseable {
 
     /**
      * A {@code StructuredTaskScope} that captures the exception of the first subtask to
-     * {@linkplain Subtask.State#FAILED fail}. Once captured, it invokes the {@linkplain
-     * #shutdown() shutdown} method to interrupt unfinished threads and wakeup the task
+     * {@linkplain Subtask.State#FAILED fail}. Once captured, it {@linkplain #shutdown()
+     * shuts down} the task scope to interrupt unfinished threads and wakeup the task
      * scope owner. The policy implemented by this class is intended for cases where the
      * results for all subtasks are required ("invoke all"); if any subtask fails then the
      * results of other unfinished subtasks are no longer needed.
      *
      * <p> Unless otherwise specified, passing a {@code null} argument to a method
      * in this class will cause a {@link NullPointerException} to be thrown.
+     *
+     * @apiNote This class implements a policy to shut down the task scope when a subtask
+     * fails. There shouldn't be any need to directly shut down the task scope with the
+     * {@link #shutdown() shutdown} method.
      *
      * @since 21
      */
@@ -1175,15 +1212,8 @@ public class StructuredTaskScope<T> implements AutoCloseable {
             this(null, Thread.ofVirtual().factory());
         }
 
-        /**
-         * Shut down this task scope when invoked for the first time with a subtask that
-         * {@linkplain Subtask.State#FAILED failed}.
-         *
-         * @throws IllegalArgumentException {@inheritDoc}
-         */
         @Override
         protected void handleComplete(Subtask<?> subtask) {
-            super.handleComplete(subtask);
             if (subtask.state() == Subtask.State.FAILED
                     && firstException == null
                     && FIRST_EXCEPTION.compareAndSet(this, null, subtask.exception())) {
@@ -1192,8 +1222,17 @@ public class StructuredTaskScope<T> implements AutoCloseable {
         }
 
         /**
-         * {@inheritDoc}
-         * @return this task scope
+         * Wait for all subtasks started in this task scope to complete or for a subtask
+         * to {@linkplain Subtask.State#FAILED fail}.
+         *
+         * <p> This method waits for all subtasks by waiting for all threads {@linkplain
+         * #fork(Callable) started} in this task scope to finish execution. It stops waiting
+         * when all threads finish, a subtask fails, or the current thread is {@linkplain
+         * Thread#interrupt() interrupted}. It also stops waiting if the {@link #shutdown()
+         * shutdown} method is invoked directly to shut down this task scope.
+         *
+         * <p> This method may only be invoked by the task scope owner.
+         *
          * @throws IllegalStateException {@inheritDoc}
          * @throws WrongThreadException {@inheritDoc}
          */
@@ -1204,8 +1243,18 @@ public class StructuredTaskScope<T> implements AutoCloseable {
         }
 
         /**
-         * {@inheritDoc}
-         * @return this task scope
+         * Wait for all subtasks started in this task scope to complete or for a subtask
+         * to {@linkplain Subtask.State#FAILED fail}, up to the given deadline.
+         *
+         * <p> This method waits for all subtasks by waiting for all threads {@linkplain
+         * #fork(Callable) started} in this task scope to finish execution. It stops waiting
+         * when all threads finish, a subtask fails, the deadline is reached, or the current
+         * thread is {@linkplain Thread#interrupt() interrupted}. It also stops waiting
+         * if the {@link #shutdown() shutdown} method is invoked directly to shut down
+         * this task scope.
+         *
+         * <p> This method may only be invoked by the task scope owner.
+         *
          * @throws IllegalStateException {@inheritDoc}
          * @throws WrongThreadException {@inheritDoc}
          */
@@ -1225,8 +1274,7 @@ public class StructuredTaskScope<T> implements AutoCloseable {
          * subtasks failed
          *
          * @throws WrongThreadException if the current thread is not the task scope owner
-         * @throws IllegalStateException if the task scope owner did not invoke join after
-         * forking
+         * @throws IllegalStateException if the task scope owner did not join after forking
          */
         public Optional<Throwable> exception() {
             ensureOwnerAndJoined();
@@ -1241,14 +1289,10 @@ public class StructuredTaskScope<T> implements AutoCloseable {
          *
          * @throws ExecutionException if a subtask failed
          * @throws WrongThreadException if the current thread is not the task scope owner
-         * @throws IllegalStateException if the task scope owner did not invoke join after
-         * forking
+         * @throws IllegalStateException if the task scope owner did not join after forking
          */
         public void throwIfFailed() throws ExecutionException {
-            ensureOwnerAndJoined();
-            Throwable exception = firstException;
-            if (exception != null)
-                throw new ExecutionException(exception);
+            throwIfFailed(ExecutionException::new);
         }
 
         /**
@@ -1263,8 +1307,7 @@ public class StructuredTaskScope<T> implements AutoCloseable {
          *
          * @throws X produced by the exception supplying function
          * @throws WrongThreadException if the current thread is not the task scope owner
-         * @throws IllegalStateException if the task scope owner did not invoke join after
-         * forking
+         * @throws IllegalStateException if the task scope owner did not join after forking
          */
         public <X extends Throwable>
         void throwIfFailed(Function<Throwable, ? extends X> esf) throws X {

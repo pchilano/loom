@@ -36,6 +36,8 @@
 #include "oops/markWord.hpp"
 #include "oops/method.hpp"
 #include "oops/methodData.hpp"
+#include "oops/resolvedFieldEntry.hpp"
+#include "oops/resolvedIndyEntry.hpp"
 #include "prims/jvmtiExport.hpp"
 #include "prims/jvmtiThreadState.hpp"
 #include "runtime/basicLock.hpp"
@@ -276,8 +278,8 @@ void InterpreterMacroAssembler::load_resolved_reference_at_index(
 
   get_constant_pool(result);
   // load pointer for resolved_references[] objArray
-  ldr(result, Address(result, ConstantPool::cache_offset_in_bytes()));
-  ldr(result, Address(result, ConstantPoolCache::resolved_references_offset_in_bytes()));
+  ldr(result, Address(result, ConstantPool::cache_offset()));
+  ldr(result, Address(result, ConstantPoolCache::resolved_references_offset()));
   resolve_oop_handle(result, tmp, rscratch2);
   // Add in the index
   add(index, index, arrayOopDesc::base_offset_in_bytes(T_OBJECT) >> LogBytesPerHeapOop);
@@ -288,7 +290,7 @@ void InterpreterMacroAssembler::load_resolved_klass_at_offset(
                              Register cpool, Register index, Register klass, Register temp) {
   add(temp, cpool, index, LSL, LogBytesPerWord);
   ldrh(temp, Address(temp, sizeof(ConstantPool))); // temp = resolved_klass_index
-  ldr(klass, Address(cpool,  ConstantPool::resolved_klasses_offset_in_bytes())); // klass = cpool->_resolved_klasses
+  ldr(klass, Address(cpool,  ConstantPool::resolved_klasses_offset())); // klass = cpool->_resolved_klasses
   add(klass, klass, temp, LSL, LogBytesPerWord);
   ldr(klass, Address(klass, Array<Klass*>::base_offset_in_bytes()));
 }
@@ -515,7 +517,7 @@ void InterpreterMacroAssembler::dispatch_only_noverify(TosState state) {
 void InterpreterMacroAssembler::dispatch_next(TosState state, int step, bool generate_poll) {
   // load next bytecode
   ldrb(rscratch1, Address(pre(rbcp, step)));
-  dispatch_base(state, Interpreter::dispatch_table(state), generate_poll);
+  dispatch_base(state, Interpreter::dispatch_table(state), /*verifyoop*/true, generate_poll);
 }
 
 void InterpreterMacroAssembler::dispatch_via(TosState state, address* table) {
@@ -589,7 +591,7 @@ void InterpreterMacroAssembler::remove_activation(
   // register for unlock_object to pass to VM directly
   lea(c_rarg1, monitor); // address of first monitor
 
-  ldr(r0, Address(c_rarg1, BasicObjectLock::obj_offset_in_bytes()));
+  ldr(r0, Address(c_rarg1, BasicObjectLock::obj_offset()));
   cbnz(r0, unlock);
 
   pop(state);
@@ -666,7 +668,7 @@ void InterpreterMacroAssembler::remove_activation(
 
     bind(loop);
     // check if current entry is used
-    ldr(rscratch1, Address(c_rarg1, BasicObjectLock::obj_offset_in_bytes()));
+    ldr(rscratch1, Address(c_rarg1, BasicObjectLock::obj_offset()));
     cbnz(rscratch1, exception);
 
     add(c_rarg1, c_rarg1, entry_size); // otherwise advance to next entry
@@ -691,6 +693,12 @@ void InterpreterMacroAssembler::remove_activation(
   if (StackReservedPages > 0) {
     // testing if reserved zone needs to be re-enabled
     Label no_reserved_zone_enabling;
+
+    // check if already enabled - if so no re-enabling needed
+    assert(sizeof(StackOverflow::StackGuardState) == 4, "unexpected size");
+    ldrw(rscratch1, Address(rthread, JavaThread::stack_guard_state_offset()));
+    cmpw(rscratch1, (u1)StackOverflow::stack_guard_enabled);
+    br(Assembler::EQ, no_reserved_zone_enabling);
 
     // look for an overflow into the stack reserved zone, i.e.
     // interpreter_frame_sender_sp <= JavaThread::reserved_stack_activation
@@ -741,8 +749,8 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg)
     const Register tmp = c_rarg2;
     const Register obj_reg = c_rarg3; // Will contain the oop
 
-    const int obj_offset = BasicObjectLock::obj_offset_in_bytes();
-    const int lock_offset = BasicObjectLock::lock_offset_in_bytes ();
+    const int obj_offset = in_bytes(BasicObjectLock::obj_offset());
+    const int lock_offset = in_bytes(BasicObjectLock::lock_offset());
     const int mark_offset = lock_offset +
                             BasicLock::displaced_header_offset_in_bytes();
 
@@ -864,14 +872,14 @@ void InterpreterMacroAssembler::unlock_object(Register lock_reg)
     if (LockingMode != LM_LIGHTWEIGHT) {
       // Convert from BasicObjectLock structure to object and BasicLock
       // structure Store the BasicLock address into %r0
-      lea(swap_reg, Address(lock_reg, BasicObjectLock::lock_offset_in_bytes()));
+      lea(swap_reg, Address(lock_reg, BasicObjectLock::lock_offset()));
     }
 
     // Load oop into obj_reg(%c_rarg3)
-    ldr(obj_reg, Address(lock_reg, BasicObjectLock::obj_offset_in_bytes()));
+    ldr(obj_reg, Address(lock_reg, BasicObjectLock::obj_offset()));
 
     // Free entry
-    str(zr, Address(lock_reg, BasicObjectLock::obj_offset_in_bytes()));
+    str(zr, Address(lock_reg, BasicObjectLock::obj_offset()));
 
     if (LockingMode == LM_LIGHTWEIGHT) {
       Label slow_case;
@@ -906,7 +914,7 @@ void InterpreterMacroAssembler::unlock_object(Register lock_reg)
       cmpxchg_obj_header(swap_reg, header_reg, obj_reg, rscratch1, count, /*fallthrough*/nullptr);
     }
     // Call the runtime routine for slow case.
-    str(obj_reg, Address(lock_reg, BasicObjectLock::obj_offset_in_bytes())); // restore obj
+    str(obj_reg, Address(lock_reg, BasicObjectLock::obj_offset())); // restore obj
     call_VM_leaf(CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorexit), lock_reg);
     b(done);
 
@@ -1805,7 +1813,7 @@ void InterpreterMacroAssembler::profile_return_type(Register mdp, Register ret, 
       cmp(rscratch1, (u1)Bytecodes::_invokehandle);
       br(Assembler::EQ, do_profile);
       get_method(tmp);
-      ldrh(rscratch1, Address(tmp, Method::intrinsic_id_offset_in_bytes()));
+      ldrh(rscratch1, Address(tmp, Method::intrinsic_id_offset()));
       subs(zr, rscratch1, static_cast<int>(vmIntrinsics::_compiledLambdaForm));
       br(Assembler::NE, profile_continue);
 
@@ -1874,8 +1882,24 @@ void InterpreterMacroAssembler::load_resolved_indy_entry(Register cache, Registe
   get_cache_index_at_bcp(index, 1, sizeof(u4));
   // Get address of invokedynamic array
   ldr(cache, Address(rcpool, in_bytes(ConstantPoolCache::invokedynamic_entries_offset())));
-  // Scale the index to be the entry index * sizeof(ResolvedInvokeDynamicInfo)
+  // Scale the index to be the entry index * sizeof(ResolvedIndyEntry)
   lsl(index, index, log2i_exact(sizeof(ResolvedIndyEntry)));
   add(cache, cache, Array<ResolvedIndyEntry>::base_offset_in_bytes());
+  lea(cache, Address(cache, index));
+}
+
+void InterpreterMacroAssembler::load_field_entry(Register cache, Register index, int bcp_offset) {
+  // Get index out of bytecode pointer
+  get_cache_index_at_bcp(index, bcp_offset, sizeof(u2));
+  // Take shortcut if the size is a power of 2
+  if (is_power_of_2(sizeof(ResolvedFieldEntry))) {
+    lsl(index, index, log2i_exact(sizeof(ResolvedFieldEntry))); // Scale index by power of 2
+  } else {
+    mov(cache, sizeof(ResolvedFieldEntry));
+    mul(index, index, cache); // Scale the index to be the entry index * sizeof(ResolvedFieldEntry)
+  }
+  // Get address of field entries array
+  ldr(cache, Address(rcpool, ConstantPoolCache::field_entries_offset()));
+  add(cache, cache, Array<ResolvedFieldEntry>::base_offset_in_bytes());
   lea(cache, Address(cache, index));
 }

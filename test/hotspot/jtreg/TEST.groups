@@ -345,7 +345,6 @@ tier2_gc_shenandoah = \
   gc/logging/TestMetaSpaceLog.java \
   gc/metaspace/TestMetaspacePerfCounters.java \
   gc/metaspace/TestMetaspacePerfCounters.java \
-  gc/startup_warnings/TestShenandoah.java \
   gc/TestFullGCALot.java \
   gc/logging/TestUnifiedLoggingSwitchStress.java \
   runtime/Metaspace/DefineClass.java \
@@ -693,8 +692,7 @@ vmTestbase_vm_gc_container = \
 
 # Playing with object arrays and various strategies of garbage producing
 vmTestbase_vm_gc_juggle = \
-  vmTestbase/gc/ArrayJuggle/ \
-  vmTestbase/gc/memory/Array/ArrayJuggle
+  vmTestbase/gc/ArrayJuggle/
 
 # GC Locker
 vmTestbase_vm_gc_locker = \
