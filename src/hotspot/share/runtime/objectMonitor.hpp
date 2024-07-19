@@ -150,8 +150,9 @@ class ObjectMonitor : public CHeapObj<mtObjectMonitor> {
 
   static OopStorage* _oop_storage;
 
-  static OopHandle _vthread_cxq_head;
-  static ParkEvent* _vthread_unparker_ParkEvent;
+  static GrowableArray<OopHandle>* _vthread_cxq_head;
+  static GrowableArray<ParkEvent*>* _vthread_unparker_ParkEvent;
+  static int _vthread_unblocker_count;
 
   // The sync code expects the header field to be at offset zero (0).
   // Enforced by the assert() in header_addr().
@@ -213,10 +214,17 @@ private:
  public:
 
   static void Initialize();
-  static void Initialize2();
 
-  static OopHandle& vthread_cxq_head() { return _vthread_cxq_head; }
-  static ParkEvent* vthread_unparker_ParkEvent() { return _vthread_unparker_ParkEvent; }
+  static void initialize_unblocker_queues(int cnt);
+  static int vthread_unblocker_count() { return _vthread_unblocker_count; }
+  static OopHandle& vthread_cxq_head(int unblocker_id) {
+    assert(unblocker_id < _vthread_unblocker_count, "invalid unblocker id");
+    return _vthread_cxq_head->at(unblocker_id);
+  }
+  static ParkEvent* vthread_unparker_ParkEvent(int unblocker_id) {
+    assert(unblocker_id < _vthread_unblocker_count, "invalid unblocker id");
+    return _vthread_unparker_ParkEvent->at(unblocker_id);
+  }
 
   // Only perform a PerfData operation if the PerfData object has been
   // allocated and if the PerfDataManager has not freed the PerfData

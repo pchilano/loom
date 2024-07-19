@@ -4034,11 +4034,11 @@ JVM_ENTRY_NO_ENV(void, JVM_SetLockId(JNIEnv* env, jclass clazz, jlong tid))
   thread->set_lock_id(tid);
 JVM_END
 
-JVM_ENTRY(jobject, JVM_TakeVirtualThreadListToUnblock(JNIEnv* env, jclass ignored))
-  ParkEvent* parkEvent = ObjectMonitor::vthread_unparker_ParkEvent();
+JVM_ENTRY(jobject, JVM_TakeVirtualThreadListToUnblock(JNIEnv* env, jclass ignored, jint unblocker_id))
+  ParkEvent* parkEvent = ObjectMonitor::vthread_unparker_ParkEvent(unblocker_id);
   assert(parkEvent != nullptr, "not initialized");
 
-  OopHandle& list_head = ObjectMonitor::vthread_cxq_head();
+  OopHandle& list_head = ObjectMonitor::vthread_cxq_head(unblocker_id);
   oop vthread_head = nullptr;
   while (true) {
     if (list_head.peek() != nullptr) {
@@ -4053,6 +4053,11 @@ JVM_ENTRY(jobject, JVM_TakeVirtualThreadListToUnblock(JNIEnv* env, jclass ignore
     parkEvent->park();
   }
 JVM_END
+
+JVM_ENTRY_NO_ENV(void, JVM_SetUnblockerCount(JNIEnv* env, jclass ignored, jint cnt))
+  ObjectMonitor::initialize_unblocker_queues(cnt);
+JVM_END
+
 /*
  * Return the current class's class file version.  The low order 16 bits of the
  * returned jint contain the class's major version.  The high order 16 bits

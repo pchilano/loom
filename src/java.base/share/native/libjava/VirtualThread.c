@@ -39,7 +39,8 @@ static JNINativeMethod methods[] = {
     { "notifyJvmtiHideFrames",     "(Z)V", (void *)&JVM_VirtualThreadHideFrames },
     { "notifyJvmtiDisableSuspend", "(Z)V", (void *)&JVM_VirtualThreadDisableSuspend },
     { "setLockId",                 "(J)V", (void *)&JVM_SetLockId},
-    { "takeVirtualThreadListToUnblock", "()" VIRTUAL_THREAD, (void *)&JVM_TakeVirtualThreadListToUnblock},
+    { "takeVirtualThreadListToUnblock", "(I)" VIRTUAL_THREAD, (void *)&JVM_TakeVirtualThreadListToUnblock},
+    { "setUnblockerCount",         "(I)V", (void *)&JVM_SetUnblockerCount },
 };
 
 JNIEXPORT void JNICALL

@@ -1161,7 +1161,10 @@ JNIEXPORT void JNICALL
 JVM_SetLockId(JNIEnv* env, jclass clazz, jlong tid);
 
 JNIEXPORT jobject JNICALL
-JVM_TakeVirtualThreadListToUnblock(JNIEnv* env, jclass ignored);
+JVM_TakeVirtualThreadListToUnblock(JNIEnv* env, jclass ignored, jint unblocker_id);
+
+JNIEXPORT void JNICALL
+JVM_SetUnblockerCount(JNIEnv* env, jclass ignored, jint cnt);
 
 /*
  * Core reflection support.

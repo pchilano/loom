@@ -1620,9 +1620,9 @@ final class VirtualThread extends BaseVirtualThread {
      * Schedule virtual threads that are ready to be scheduled after they blocked on
      * monitor enter.
      */
-    private static void unblockVirtualThreads() {
+    private static void unblockVirtualThreads(int unblockerID) {
         while (true) {
-            VirtualThread vthread = takeVirtualThreadListToUnblock();
+            VirtualThread vthread = takeVirtualThreadListToUnblock(unblockerID);
             while (vthread != null) {
                 assert vthread.onWaitingList == 1;
                 VirtualThread nextThread = vthread.next;
@@ -1642,12 +1642,20 @@ final class VirtualThread extends BaseVirtualThread {
      * Retrieves the list of virtual threads that are waiting to be unblocked, waiting
      * if necessary until a list of one or more threads becomes available.
      */
-    private static native VirtualThread takeVirtualThreadListToUnblock();
+    private static native VirtualThread takeVirtualThreadListToUnblock(int unblockerID);
+    private static native void setUnblockerCount(int cnt);
 
     static {
-        var unblocker = InnocuousThread.newThread("VirtualThread-unblocker",
-                VirtualThread::unblockVirtualThreads);
-        unblocker.setDaemon(true);
-        unblocker.start();
+        int ncpus = Runtime.getRuntime().availableProcessors();
+        int unblockerCount = Math.max(Integer.highestOneBit(ncpus / 4), 1);
+        setUnblockerCount(unblockerCount);
+
+        for (int i = 0; i < unblockerCount; i++) {
+            final int unblockerID = i;
+            var unblocker = InnocuousThread.newThread("VirtualThread-unblocker",
+                    () -> unblockVirtualThreads(unblockerID));
+            unblocker.setDaemon(true);
+            unblocker.start();
+        }
     }
 }

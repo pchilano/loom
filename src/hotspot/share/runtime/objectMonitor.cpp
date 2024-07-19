@@ -113,8 +113,9 @@ DEBUG_ONLY(static volatile bool InitDone = false;)
 
 OopStorage* ObjectMonitor::_oop_storage = nullptr;
 
-OopHandle ObjectMonitor::_vthread_cxq_head;
-ParkEvent* ObjectMonitor::_vthread_unparker_ParkEvent = nullptr;
+GrowableArray<OopHandle>* ObjectMonitor::_vthread_cxq_head = nullptr;
+GrowableArray<ParkEvent*>* ObjectMonitor::_vthread_unparker_ParkEvent = nullptr;
+int ObjectMonitor::_vthread_unblocker_count = 0;
 
 static void post_virtual_thread_pinned_event(JavaThread* current, const char* reason) {
   EventVirtualThreadPinned e;
@@ -1571,6 +1572,7 @@ void ObjectMonitor::ExitEpilog(JavaThread* current, ObjectWaiter* Wakee) {
 
   oop vthread = nullptr;
   ParkEvent * Trigger;
+  int unblocker_id = 0;
   if (!Wakee->is_vthread()) {
     JavaThread* t = Wakee->thread();
     assert(t != nullptr, "");
@@ -1579,8 +1581,10 @@ void ObjectMonitor::ExitEpilog(JavaThread* current, ObjectWaiter* Wakee) {
   } else {
     vthread = Wakee->vthread();
     assert(vthread != nullptr, "");
-    Trigger = ObjectMonitor::vthread_unparker_ParkEvent();
-    _succ = (JavaThread*)java_lang_Thread::thread_id(vthread);
+    int64_t tid = java_lang_Thread::thread_id(vthread);
+    _succ = (JavaThread*)tid;
+    unblocker_id = (intptr_t)tid & (intptr_t)(vthread_unblocker_count() - 1);
+    Trigger = vthread_unparker_ParkEvent(unblocker_id);
   }
 
   // Hygiene -- once we've set _owner = nullptr we can't safely dereference Wakee again.
@@ -1598,7 +1602,7 @@ void ObjectMonitor::ExitEpilog(JavaThread* current, ObjectWaiter* Wakee) {
   if (vthread == nullptr) {
     // Platform thread case
     Trigger->unpark();
-  } else if (java_lang_VirtualThread::set_onWaitingList(vthread, _vthread_cxq_head)) {
+  } else if (java_lang_VirtualThread::set_onWaitingList(vthread, vthread_cxq_head(unblocker_id))) {
     Trigger->unpark();
   }
 
@@ -2556,9 +2560,16 @@ void ObjectMonitor::Initialize() {
   DEBUG_ONLY(InitDone = true;)
 }
 
-void ObjectMonitor::Initialize2() {
-  _vthread_cxq_head = OopHandle(JavaThread::thread_oop_storage(), nullptr);
-  _vthread_unparker_ParkEvent = ParkEvent::Allocate(nullptr);
+void ObjectMonitor::initialize_unblocker_queues(int cnt) {
+  assert(is_power_of_2(cnt), "");
+  _vthread_unblocker_count = cnt;
+  _vthread_cxq_head = new (mtObjectMonitor) GrowableArray<OopHandle>(cnt, mtObjectMonitor);
+  _vthread_unparker_ParkEvent = new (mtObjectMonitor) GrowableArray<ParkEvent*>(cnt, mtObjectMonitor);
+
+  for (int i = 0; i < cnt; i++) {
+    _vthread_cxq_head->push(OopHandle(JavaThread::thread_oop_storage(), nullptr));
+    _vthread_unparker_ParkEvent->push(ParkEvent::Allocate(nullptr));
+  }
 }
 
 void ObjectMonitor::print_on(outputStream* st) const {
