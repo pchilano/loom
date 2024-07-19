@@ -68,6 +68,7 @@
 #include "runtime/objectMonitor.inline.hpp"
 #include "runtime/perfData.hpp"
 #include "runtime/sharedRuntime.hpp"
+#include "runtime/stackFrameStream.inline.hpp"
 #include "runtime/stackWatermarkSet.hpp"
 #include "runtime/stubRoutines.hpp"
 #include "runtime/synchronizer.hpp"
@@ -1956,6 +1957,19 @@ JRT_LEAF(void,  SharedRuntime::log_jni_monitor_still_held())
                    ") exiting with Objects still locked by JNI MonitorEnter.",
                    vthread_id, carrier_id);
   }
+JRT_END
+
+JRT_ENTRY_NO_ASYNC(void, SharedRuntime::complete_monitor_unlocking_C_nonleaf(oopDesc* obj, BasicLock* lock, JavaThread* current))
+  assert(current == JavaThread::current(), "pre-condition");
+#ifdef ASSERT
+  frame last_frame = current->last_frame();
+  assert(last_frame.is_runtime_frame(), "must be");
+  log_trace(continuations,tracking)("Called complete_monitor_unlocking_C_nonleaf");
+  for (StackFrameStream fst(current, true /* update */, true /* process_frames */); !fst.is_done(); fst.next()) {
+    fst.current()->verify(fst.register_map());
+  }
+#endif
+  SharedRuntime::monitor_exit_helper(obj, lock, current);
 JRT_END
 
 #ifndef PRODUCT
