@@ -1925,6 +1925,14 @@ JRT_BLOCK_ENTRY(void, SharedRuntime::resume_monitor_operation(JavaThread* curren
 JRT_END
 
 void SharedRuntime::monitor_exit_helper(oopDesc* obj, BasicLock* lock, JavaThread* current) {
+#ifdef ASSERT
+  frame last_frame = current->last_frame();
+  assert(last_frame.is_runtime_frame() || last_frame.is_native_frame(), "must be");
+  for (StackFrameStream fst(current, true /* update */, true /* process_frames */); !fst.is_done(); fst.next()) {
+    fst.current()->verify(fst.register_map());
+  }
+#endif
+
   assert(JavaThread::current() == current, "invariant");
   // Exit must be non-blocking, and therefore no exceptions can be thrown.
   ExceptionMark em(current);
@@ -1961,14 +1969,6 @@ JRT_END
 
 JRT_ENTRY_NO_ASYNC(void, SharedRuntime::complete_monitor_unlocking_C_nonleaf(oopDesc* obj, BasicLock* lock, JavaThread* current))
   assert(current == JavaThread::current(), "pre-condition");
-#ifdef ASSERT
-  frame last_frame = current->last_frame();
-  assert(last_frame.is_runtime_frame(), "must be");
-  log_trace(continuations,tracking)("Called complete_monitor_unlocking_C_nonleaf");
-  for (StackFrameStream fst(current, true /* update */, true /* process_frames */); !fst.is_done(); fst.next()) {
-    fst.current()->verify(fst.register_map());
-  }
-#endif
   SharedRuntime::monitor_exit_helper(obj, lock, current);
 JRT_END
 
