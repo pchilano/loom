@@ -234,6 +234,7 @@ void vframeArrayElement::unpack_on_stack(int caller_actual_parameters,
           bcp = dreturn;
           break;
         }
+        case T_ARRAY:
         case T_OBJECT: {
           static u_char areturn[] = {(u_char)Bytecodes::_areturn, (u_char)Bytecodes::_shouldnotreachhere};
           bcp = areturn;

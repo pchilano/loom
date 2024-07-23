@@ -906,15 +906,15 @@ void frame::oops_interpreted_do(OopClosure* f, const RegisterMap* map, bool quer
   Thread *thread = Thread::current();
   methodHandle m (thread, interpreter_frame_method());
 
-  if (UseNewCode && !m->is_native() && m->result_type() == T_OBJECT) {
-    address bcp = interpreter_frame_bcp();
+  address bcp = interpreter_frame_bcp();
+  if (UseNewCode && !m->is_native() && !m->contains(bcp)) {
     // Check for pseudo-bci or shared bytecodes array
-    if (!m->contains(bcp)) {
+    if (m->result_type() == T_OBJECT || m->result_type() == T_ARRAY) {
       assert(interpreter_frame_expression_stack_size() == 1, "");
       assert(interpreter_frame_tos_address() == interpreter_frame_expression_stack_at(0), "");
       f->do_oop((oop*)interpreter_frame_expression_stack_at(0));
-      return;
     }
+    return;
   }
 
   jint      bci = interpreter_frame_bci();
