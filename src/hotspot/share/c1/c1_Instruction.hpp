@@ -1507,8 +1507,8 @@ LEAF(MonitorEnter, AccessMonitor)
 LEAF(MonitorExit, AccessMonitor)
  public:
   // creation
-  MonitorExit(Value obj, int monitor_no)
-  : AccessMonitor(obj, monitor_no, nullptr)
+  MonitorExit(Value obj, int monitor_no, ValueStack* state_before)
+  : AccessMonitor(obj, monitor_no, state_before)
   {
     ASSERT_VALUES
   }

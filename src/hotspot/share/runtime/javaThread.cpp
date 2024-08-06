@@ -500,6 +500,7 @@ JavaThread::JavaThread(MEMFLAGS flags) :
   _preempting(false),
   _preemption_cancelled(false),
   _pending_interrupted_exception(false),
+  _c1_monitorexit_is_leaf(false),
   _preempt_alternate_return(nullptr),
   DEBUG_ONLY(_obj_locker_count(0) COMMA)
 

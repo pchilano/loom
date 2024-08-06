@@ -485,6 +485,7 @@ class JavaThread: public Thread {
   bool _preempting;
   bool _preemption_cancelled;
   bool _pending_interrupted_exception;
+  bool _c1_monitorexit_is_leaf;
   address _preempt_alternate_return; // used when preempting a thread
 
 #ifdef ASSERT
@@ -663,6 +664,8 @@ private:
 
   bool pending_interrupted_exception()           { return _pending_interrupted_exception; }
   void set_pending_interrupted_exception(bool b) { _pending_interrupted_exception = b; }
+
+  bool c1_monitorexit_is_leaf() { return _c1_monitorexit_is_leaf; }
 
   void set_preempt_alternate_return(address val) { _preempt_alternate_return = val; }
 
@@ -887,6 +890,7 @@ private:
   static ByteSize jni_monitor_count_offset()  { return byte_offset_of(JavaThread, _jni_monitor_count); }
   static ByteSize preempting_offset()         { return byte_offset_of(JavaThread, _preempting); }
   static ByteSize preemption_cancelled_offset()  { return byte_offset_of(JavaThread, _preemption_cancelled); }
+  static ByteSize c1_monitorexit_is_leaf_offset() { return byte_offset_of(JavaThread, _c1_monitorexit_is_leaf); }
   static ByteSize preempt_alternate_return_offset() { return byte_offset_of(JavaThread, _preempt_alternate_return); }
 
 #if INCLUDE_JVMTI

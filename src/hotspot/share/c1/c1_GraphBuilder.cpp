@@ -1676,7 +1676,7 @@ void GraphBuilder::method_return(Value x, bool ignore_return) {
     } else {
       receiver = append(new Constant(new ClassConstant(method()->holder())));
     }
-    append_split(new MonitorExit(receiver, state()->unlock()));
+    monitorexit(receiver, bci());
   }
 
   if (need_mem_bar) {
@@ -2324,7 +2324,8 @@ void GraphBuilder::monitorenter(Value x, int bci) {
 
 
 void GraphBuilder::monitorexit(Value x, int bci) {
-  append_with_bci(new MonitorExit(x, state()->unlock()), bci);
+  ValueStack* state_before = copy_state_for_exception_with_bci(bci);
+  append_with_bci(new MonitorExit(x, state()->unlock(), state_before), bci);
   kill_all();
 }
 

@@ -1928,7 +1928,8 @@ void SharedRuntime::monitor_exit_helper(oopDesc* obj, BasicLock* lock, JavaThrea
 #ifdef ASSERT
   frame last_frame = current->last_frame();
   assert(last_frame.is_runtime_frame() || last_frame.is_native_frame(), "must be");
-  for (StackFrameStream fst(current, true /* update */, true /* process_frames */); !fst.is_done(); fst.next()) {
+  bool c1_leaf = current->c1_monitorexit_is_leaf();
+  for (StackFrameStream fst(current, true /* update */, true /* process_frames */); !c1_leaf && !fst.is_done(); fst.next()) {
     fst.current()->verify(fst.register_map());
   }
 #endif
