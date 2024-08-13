@@ -2376,7 +2376,7 @@ static void assert_equal(IRScopeDebugInfo* d1, IRScopeDebugInfo* d2) {
 }
 
 static void check_stack_depth(CodeEmitInfo* info, int stack_end) {
-  if (info->stack()->bci() != SynchronizationEntryBCI && !info->scope()->method()->is_native()) {
+  if (info->stack()->bci() != SynchronizationEntryBCI && info->stack()->bci() != AfterBci && !info->scope()->method()->is_native()) {
     Bytecodes::Code code = info->scope()->method()->java_code_at_bci(info->stack()->bci());
     switch (code) {
       case Bytecodes::_ifnull    : // fall through

@@ -203,8 +203,9 @@ void vframeArrayElement::unpack_on_stack(int caller_actual_parameters,
     } else if (bci == AfterBci) {
       // XXX already did unlock, so need to return as if unsynchronized, or use caller context
       assert(method()->is_synchronized(), "");
-      int locks = monitors() == nullptr ? 0 : monitors()->number_of_monitors();
-      assert(locks == 0, "");
+      assert(monitors() == nullptr || monitors()->number_of_monitors() == 0, "");
+      assert(is_top_frame, "");
+
       assert(!thread->do_not_unlock_if_synchronized(), "recursive unlock?");
       thread->set_do_not_unlock_if_synchronized(true);
       // The fake bytecode arrays below mostly work, except they don't belong to the method,
@@ -690,6 +691,8 @@ void vframeArray::unpack_to_stack(frame &unpack_frame, int exec_mode, int caller
       const char* code_name;
       if (bci == SynchronizationEntryBCI) {
         code_name = "sync entry";
+      } else if (bci == AfterBci) {
+        code_name = "sync exit";
       } else {
         Bytecodes::Code code = elem->method()->code_at(bci);
         code_name = Bytecodes::name(code);

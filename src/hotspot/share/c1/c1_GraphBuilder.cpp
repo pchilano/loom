@@ -1632,7 +1632,13 @@ void GraphBuilder::method_return(Value x, bool ignore_return) {
     // released before we jump to the continuation block.
     if (method()->is_synchronized()) {
       assert(state()->locks_size() == 1, "receiver must be locked here");
-      monitorexit(state()->lock_at(0), SynchronizationEntryBCI);
+      if (x != nullptr && !ignore_return) {
+        state()->push(x->type(), x);
+      }
+      monitorexit(state()->lock_at(0), AfterBci);
+      if (x != nullptr && !ignore_return) {
+        state()->pop(x->type());
+      }
     }
 
     if (need_mem_bar) {
@@ -1667,7 +1673,6 @@ void GraphBuilder::method_return(Value x, bool ignore_return) {
     return;
   }
 
-  state()->truncate_stack(0);
   if (method()->is_synchronized()) {
     // perform the unlocking before exiting the method
     Value receiver;
@@ -1676,8 +1681,12 @@ void GraphBuilder::method_return(Value x, bool ignore_return) {
     } else {
       receiver = append(new Constant(new ClassConstant(method()->holder())));
     }
-    monitorexit(receiver, bci());
+    if (x != nullptr && !ignore_return) {
+      state()->push(x->type(), x);
+    }
+    monitorexit(receiver, AfterBci);
   }
+  state()->truncate_stack(0);
 
   if (need_mem_bar) {
       append(new MemBar(lir_membar_storestore));

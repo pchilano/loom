@@ -299,9 +299,9 @@ void ValueStack::verify() {
   if (kind() == Parsing) {
     assert(bci() == -99, "bci not defined during parsing");
   } else {
-    assert(bci() >= -1, "bci out of range");
+    assert(bci() >= -2, "bci out of range");
     assert(bci() < scope()->method()->code_size(), "bci out of range");
-    assert(bci() == SynchronizationEntryBCI || Bytecodes::is_defined(scope()->method()->java_code_at_bci(bci())), "make sure bci points at a real bytecode");
+    assert(bci() == SynchronizationEntryBCI || bci() == AfterBci || Bytecodes::is_defined(scope()->method()->java_code_at_bci(bci())), "make sure bci points at a real bytecode");
     assert(scope()->method()->liveness_at_bci(bci()).is_valid(), "liveness at bci must be valid");
   }
 

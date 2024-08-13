@@ -173,7 +173,7 @@ int IRScope::max_stack() const {
 bool IRScopeDebugInfo::should_reexecute() {
   ciMethod* cur_method = scope()->method();
   int       cur_bci    = bci();
-  if (cur_method != nullptr && cur_bci != SynchronizationEntryBCI) {
+  if (cur_method != nullptr && cur_bci != SynchronizationEntryBCI && cur_bci != AfterBci) {
     Bytecodes::Code code = cur_method->java_code_at_bci(cur_bci);
     return Interpreter::bytecode_should_reexecute(code);
   } else

@@ -1945,11 +1945,32 @@ void SharedRuntime::monitor_exit_helper(oopDesc* obj, BasicLock* lock, JavaThrea
     }
     return;
   }
-  ObjectSynchronizer::exit(obj, lock, current);
+
+  if (!current->c1_monitorexit_is_leaf()) {
+    JRT_BLOCK_NO_ASYNC
+    ObjectSynchronizer::exit(obj, lock, current);
+    JRT_BLOCK_END
+
+    // Stress deoptimization
+    RegisterMap reg_map(current,
+                       RegisterMap::UpdateMap::skip,
+                       RegisterMap::ProcessFrames::skip,
+                       RegisterMap::WalkContinuation::skip);
+    frame stubFrame = current->last_frame();
+    frame caller_fr = stubFrame.sender(&reg_map);
+    Deoptimization::deoptimize(current, caller_fr);
+  } else {
+    ObjectSynchronizer::exit(obj, lock, current);
+  }
 }
 
 // Handles the uncommon cases of monitor unlocking in compiled code
 JRT_LEAF(void, SharedRuntime::complete_monitor_unlocking_C(oopDesc* obj, BasicLock* lock, JavaThread* current))
+  assert(current == JavaThread::current(), "pre-condition");
+  SharedRuntime::monitor_exit_helper(obj, lock, current);
+JRT_END
+
+JRT_BLOCK_ENTRY(void, SharedRuntime::complete_monitor_unlocking_C_nonleaf(oopDesc* obj, BasicLock* lock, JavaThread* current))
   assert(current == JavaThread::current(), "pre-condition");
   SharedRuntime::monitor_exit_helper(obj, lock, current);
 JRT_END
@@ -1966,11 +1987,6 @@ JRT_LEAF(void,  SharedRuntime::log_jni_monitor_still_held())
                    ") exiting with Objects still locked by JNI MonitorEnter.",
                    vthread_id, carrier_id);
   }
-JRT_END
-
-JRT_ENTRY_NO_ASYNC(void, SharedRuntime::complete_monitor_unlocking_C_nonleaf(oopDesc* obj, BasicLock* lock, JavaThread* current))
-  assert(current == JavaThread::current(), "pre-condition");
-  SharedRuntime::monitor_exit_helper(obj, lock, current);
 JRT_END
 
 #ifndef PRODUCT

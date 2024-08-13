@@ -343,14 +343,14 @@ bool frame::can_be_deoptimized() const {
     return false;
   }
 
-  ResourceMark rm;
-  ScopeDesc* sd = nm->scope_desc_at(pc());
-  if (sd->bci() == AfterExceptionBci) {
-    return false;
-  }
-  if (sd->is_top() && sd->bci() == AfterBci) {
-    return false;
-  }
+  // ResourceMark rm;
+  // ScopeDesc* sd = nm->scope_desc_at(pc());
+  // if (sd->bci() == AfterExceptionBci) {
+  //   return false;
+  // }
+  // if (sd->is_top() && sd->bci() == AfterBci) {
+  //   return false;
+  // }
 
   return true;
 }

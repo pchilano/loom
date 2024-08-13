@@ -1698,6 +1698,10 @@ vframeArray* Deoptimization::create_vframeArray(JavaThread* thread, frame fr, Re
       const char* code_name;
       if (bci == SynchronizationEntryBCI) {
         code_name = "sync entry";
+      } else if (bci == AfterBci) {
+        code_name = "sync exit";
+      } else if (bci == AfterExceptionBci) {
+        code_name = "after exception bci";
       } else {
         Bytecodes::Code code = vf->method()->code_at(bci);
         code_name = Bytecodes::name(code);
