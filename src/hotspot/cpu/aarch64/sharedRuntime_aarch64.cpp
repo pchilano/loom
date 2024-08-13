@@ -2091,7 +2091,11 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
     __ ldr(r19, Address(rthread, in_bytes(Thread::pending_exception_offset())));
     __ str(zr, Address(rthread, in_bytes(Thread::pending_exception_offset())));
 
-    __ rt_call(CAST_FROM_FN_PTR(address, SharedRuntime::complete_monitor_unlocking_C));
+    if (UseNewCode) {
+      __ rt_call(CAST_FROM_FN_PTR(address, SharedRuntime::complete_monitor_unlocking_C_nonleaf));
+    } else {
+      __ rt_call(CAST_FROM_FN_PTR(address, SharedRuntime::complete_monitor_unlocking_C));
+    }
 
 #ifdef ASSERT
     {

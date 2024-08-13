@@ -258,6 +258,7 @@ void vframeArrayElement::unpack_on_stack(int caller_actual_parameters,
   } else if (should_reexecute()) { //reexecute this bytecode
     assert(is_top_frame, "reexecute allowed only for the top frame");
     bcp = method()->bcp_from(bci);
+    assert(*bcp != Bytecodes::_monitorenter && *bcp != Bytecodes::_monitorexit, "");
     pc  = Interpreter::deopt_reexecute_entry(method(), bcp);
   } else {
     bcp = method()->bcp_from(bci);
@@ -280,7 +281,8 @@ void vframeArrayElement::unpack_on_stack(int caller_actual_parameters,
   //
   // For realloc failure exception we just pop frames, skip the guarantee.
 
-  assert(*bcp != Bytecodes::_monitorenter || is_top_frame, "a _monitorenter must be a top frame");
+  assert((*bcp != Bytecodes::_monitorenter && *bcp != Bytecodes::_monitorexit) ||
+         is_top_frame, "a _monitorenter/_monitorexit must be a top frame");
   assert(thread->deopt_compiled_method() != nullptr, "compiled method should be known");
   guarantee(realloc_failure_exception || !(thread->deopt_compiled_method()->is_compiled_by_c2() &&
               *bcp == Bytecodes::_monitorenter             &&
