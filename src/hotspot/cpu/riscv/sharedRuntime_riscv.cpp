@@ -2423,11 +2423,6 @@ uint SharedRuntime::out_preserve_stack_slots() {
   return 0;
 }
 
-VMReg SharedRuntime::thread_register() {
-  Unimplemented();
-  return nullptr;
-}
-
 //------------------------------generate_handler_blob------
 //
 // Generate a special Compile2Runtime blob that saves all registers,

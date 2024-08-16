@@ -2569,11 +2569,6 @@ uint SharedRuntime::out_preserve_stack_slots() {
   return 0;
 }
 
-
-VMReg SharedRuntime::thread_register() {
-  return rthread->as_VMReg();
-}
-
 //------------------------------generate_handler_blob------
 //
 // Generate a special Compile2Runtime blob that saves all registers,

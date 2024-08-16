@@ -426,8 +426,6 @@ class frame {
   oop saved_oop_result(RegisterMap* map) const;
   void set_saved_oop_result(RegisterMap* map, oop obj);
 
-  static JavaThread** saved_thread_address(const frame& f);
-
   // For debugging
  private:
   const char* print_name() const;

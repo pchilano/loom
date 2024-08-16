@@ -463,8 +463,6 @@ class SharedRuntime: AllStatic {
   // On PowerPC it includes the 4 words holding the old TOC & LR glue.
   static uint in_preserve_stack_slots();
 
-  static VMReg thread_register();
-
   static void continuation_enter_cleanup(MacroAssembler* masm);
 
   // Is vector's size (in bytes) bigger than a size saved by default?

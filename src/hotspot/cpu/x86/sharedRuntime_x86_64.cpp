@@ -2626,10 +2626,6 @@ uint SharedRuntime::in_preserve_stack_slots() {
   return 4 + 2 * VerifyStackAtCalls;
 }
 
-VMReg SharedRuntime::thread_register() {
-  return r15_thread->as_VMReg();
-}
-
 //------------------------------generate_deopt_blob----------------------------
 void SharedRuntime::generate_deopt_blob() {
   // Allocate space for the code

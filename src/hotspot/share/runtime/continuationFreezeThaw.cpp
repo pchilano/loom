@@ -2450,11 +2450,6 @@ intptr_t* ThawBase::handle_preempted_continuation(intptr_t* sp, int preempt_kind
     // Possibly update return pc on the top native wrapper frame so
     // that we resume execution at the right instruction.
     fix_native_wrapper_return_pc_pd(top);
-  } else if (top.is_runtime_frame()) {
-    // The continuation might now run on a different platform thread than the previous time so
-    // we need to adjust the current thread saved in the stub frame before restoring registers.
-    JavaThread** thread_addr = frame::saved_thread_address(top);
-    if (thread_addr != nullptr) *thread_addr = _thread;
   }
   sp = push_resume_adapter(top);
   return sp;

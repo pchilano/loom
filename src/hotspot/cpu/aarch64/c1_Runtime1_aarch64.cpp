@@ -170,18 +170,12 @@ class StubFrame: public StackObj {
  private:
   StubAssembler* _sasm;
   bool _return_state;
-  bool _use_pop_on_epilogue;
-
-  StubFrame(StubAssembler* sasm, const char* name, bool must_gc_arguments,
-            return_state_t return_state, bool use_pop_on_epilogue);
 
  public:
-  StubFrame(StubAssembler* sasm, const char* name, bool must_gc_arguments, bool use_pop_on_epilogue);
-  StubFrame(StubAssembler* sasm, const char* name, bool must_gc_arguments, return_state_t return_state);
-  StubFrame(StubAssembler* sasm, const char* name, bool must_gc_arguments);
-  ~StubFrame();
-
+  StubFrame(StubAssembler* sasm, const char* name, bool must_gc_arguments, return_state_t return_state=requires_return);
   void load_argument(int offset_in_words, Register reg);
+
+  ~StubFrame();
 };;
 
 void StubAssembler::prologue(const char* name, bool must_gc_arguments) {
@@ -189,37 +183,18 @@ void StubAssembler::prologue(const char* name, bool must_gc_arguments) {
   enter();
 }
 
-void StubAssembler::epilogue(bool use_pop) {
-  // Avoid using a leave instruction when this frame may
-  // have been frozen, since the current value of rfp
-  // restored from the stub would be invalid. We still
-  // must restore the rfp value saved on enter though.
-  if (use_pop) {
-    ldp(rfp, lr, Address(post(sp, 2 * wordSize)));
-  } else {
-    leave();
-  }
+void StubAssembler::epilogue() {
+  leave();
   ret(lr);
 }
 
 #define __ _sasm->
 
-StubFrame::StubFrame(StubAssembler* sasm, const char* name, bool must_gc_arguments,
-                     return_state_t return_state, bool use_pop_on_epilogue)
-  : _sasm(sasm), _return_state(return_state), _use_pop_on_epilogue(use_pop_on_epilogue) {
+StubFrame::StubFrame(StubAssembler* sasm, const char* name, bool must_gc_arguments, return_state_t return_state) {
+  _sasm = sasm;
+  _return_state = return_state;
   __ prologue(name, must_gc_arguments);
 }
-
-StubFrame::StubFrame(StubAssembler* sasm, const char* name, bool must_gc_arguments,
-                     bool use_pop_on_epilogue) :
-  StubFrame(sasm, name, must_gc_arguments, requires_return, use_pop_on_epilogue) {}
-
-StubFrame::StubFrame(StubAssembler* sasm, const char* name, bool must_gc_arguments,
-                     return_state_t return_state) :
-  StubFrame(sasm, name, must_gc_arguments, return_state, /*use_pop_on_epilogue*/false) {}
-
-StubFrame::StubFrame(StubAssembler* sasm, const char* name, bool must_gc_arguments) :
-  StubFrame(sasm, name, must_gc_arguments, requires_return, /*use_pop_on_epilogue*/false) {}
 
 // load parameters that were stored with LIR_Assembler::store_parameter
 // Note: offsets for store_parameter and load_argument must match
@@ -228,7 +203,11 @@ void StubFrame::load_argument(int offset_in_words, Register reg) {
 }
 
 StubFrame::~StubFrame() {
-  __ epilogue(_use_pop_on_epilogue);
+  if (_return_state == requires_return) {
+    __ epilogue();
+  } else {
+    __ should_not_reach_here();
+  }
 }
 
 #undef __
@@ -249,7 +228,7 @@ const int float_regs_as_doubles_size_in_slots = pd_nof_fpu_regs_frame_map * 2;
 //
 
 enum reg_save_layout {
-  reg_save_frame_size = 32 /* float */ + 32 /* integer */
+  reg_save_frame_size = 32 /* float */ + 30 /* integer */
 };
 
 // Save off registers which might be killed by calls into the runtime.
@@ -273,7 +252,7 @@ static OopMap* generate_oop_map(StubAssembler* sasm, bool save_fpu_registers) {
 
   for (int i = 0; i < FrameMap::nof_cpu_regs; i++) {
     Register r = as_Register(i);
-    if (r == rthread || (i <= 18 && i != rscratch1->encoding() && i != rscratch2->encoding())) {
+    if (i <= 18 && i != rscratch1->encoding() && i != rscratch2->encoding()) {
       int sp_offset = cpu_reg_save_offsets[i];
       oop_map->set_callee_saved(VMRegImpl::stack2reg(sp_offset),
                                 r->as_VMReg());
@@ -297,7 +276,12 @@ static OopMap* save_live_registers(StubAssembler* sasm,
                                    bool save_fpu_registers = true) {
   __ block_comment("save_live_registers");
 
-  __ push(RegSet::range(r0, r29), sp);         // integer registers except lr & sp
+  // For a vthread preempted on monitorenter it is particularly
+  // important that r28/rfp are not saved since restoring them
+  // later will overwrite the registers with invalid values. For
+  // the normal case these are not used by the register allocator
+  // and are callee saved in the native calling convention anyways.
+  __ push(RegSet::range(r0, r27), sp);         // integer registers up to r27
 
   if (save_fpu_registers) {
     for (int i = 31; i>= 0; i -= 4) {
@@ -321,7 +305,7 @@ static void restore_live_registers(StubAssembler* sasm, bool restore_fpu_registe
     __ add(sp, sp, 32 * wordSize);
   }
 
-  __ pop(RegSet::range(r0, r29), sp);
+  __ pop(RegSet::range(r0, r27), sp);
 }
 
 static void restore_live_registers_except_r0(StubAssembler* sasm, bool restore_fpu_registers = true)  {
@@ -335,7 +319,7 @@ static void restore_live_registers_except_r0(StubAssembler* sasm, bool restore_f
   }
 
   __ ldp(zr, r1, Address(__ post(sp, 16)));
-  __ pop(RegSet::range(r2, r29), sp);
+  __ pop(RegSet::range(r2, r27), sp);
 }
 
 
@@ -358,15 +342,6 @@ void Runtime1::initialize_pd() {
   }
 }
 
-// return: offset in 64-bit words.
-uint Runtime1::runtime_blob_current_thread_offset(frame f) {
-  CodeBlob* cb = f.cb();
-  assert(cb == Runtime1::blob_for(Runtime1::monitorenter_id) ||
-         cb == Runtime1::blob_for(Runtime1::monitorenter_nofpu_id), "must be");
-  assert(cb != nullptr && cb->is_runtime_stub(), "invalid frame");
-  int offset = cpu_reg_save_offsets[rthread->encoding()];
-  return offset / 2;   // SP offsets are in halfwords
-}
 
 // target: the entry point of the method that creates and posts the exception oop
 // has_argument: true if the exception needs arguments (passed in rscratch1 and rscratch2)
@@ -892,7 +867,7 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
       // fall through
     case monitorenter_id:
       {
-        StubFrame f(sasm, "monitorenter", dont_gc_arguments, /*use_pop_on_epilogue*/true);
+        StubFrame f(sasm, "monitorenter", dont_gc_arguments);
         OopMap* map = save_live_registers(sasm, save_fpu_registers);
 
         // Called with store_parameter and not C abi

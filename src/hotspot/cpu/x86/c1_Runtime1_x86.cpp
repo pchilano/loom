@@ -579,7 +579,6 @@ void C1_MacroAssembler::restore_live_registers(bool restore_fpu_registers) {
 
 }
 
-
 void C1_MacroAssembler::restore_live_registers_except_rax(bool restore_fpu_registers) {
   __ block_comment("restore_live_registers_except_rax");
 
@@ -616,6 +615,17 @@ void C1_MacroAssembler::restore_live_registers_except_rax(bool restore_fpu_regis
 #endif // _LP64
 }
 
+void C1_MacroAssembler::restore_live_registers_except_r15(bool restore_fpu_registers) {
+  __ block_comment("restore_live_registers_except_r15");
+
+  restore_fpu(this, restore_fpu_registers);
+#ifdef _LP64
+  __ restore_legacy_gprs(true /*skip_r15*/);
+#else
+  __ popa();
+#endif
+}
+
 #undef __
 #define __ sasm->
 
@@ -633,13 +643,12 @@ static void restore_live_registers_except_rax(StubAssembler* sasm, bool restore_
   sasm->restore_live_registers_except_rax(restore_fpu_registers);
 }
 
+static void restore_live_registers_except_r15(StubAssembler* sasm, bool restore_fpu_registers = true) {
+  __ restore_live_registers_except_r15(restore_fpu_registers);
+}
 
 void Runtime1::initialize_pd() {
   // nothing to do
-}
-
-uint Runtime1::runtime_blob_current_thread_offset(frame f) {
-  return r15_off / 2;
 }
 
 // Target: the entry point of the method that creates and posts the exception oop.
@@ -1330,7 +1339,10 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
 
         oop_maps = new OopMapSet();
         oop_maps->add_gc_map(call_offset, map);
-        restore_live_registers(sasm, save_fpu_registers);
+        // Might be a vthread running again in a different carrier after
+        // being preempted, so avoid restoring r15. For the normal case
+        // r15 is callee saved anyways.
+        restore_live_registers_except_r15(sasm, save_fpu_registers);
       }
       break;
 

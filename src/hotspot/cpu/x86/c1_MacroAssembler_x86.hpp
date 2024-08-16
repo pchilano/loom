@@ -126,6 +126,7 @@
 
   void save_live_registers_no_oop_map(bool save_fpu_registers);
   void restore_live_registers_except_rax(bool restore_fpu_registers);
+  void restore_live_registers_except_r15(bool restore_fpu_registers);
   void restore_live_registers(bool restore_fpu_registers);
 
 #endif // CPU_X86_C1_MACROASSEMBLER_X86_HPP

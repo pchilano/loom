@@ -10416,8 +10416,8 @@ void MacroAssembler::save_legacy_gprs() {
 }
 
 // Resotres back legacy GPRs state from stack.
-void MacroAssembler::restore_legacy_gprs() {
-  movq(r15, Address(rsp, 0));
+void MacroAssembler::restore_legacy_gprs(bool skip_r15) {
+  if (!skip_r15) movq(r15, Address(rsp, 0));
   movq(r14, Address(rsp, wordSize));
   movq(r13, Address(rsp, 2 * wordSize));
   movq(r12, Address(rsp, 3 * wordSize));
