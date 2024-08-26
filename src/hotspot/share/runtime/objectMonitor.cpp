@@ -42,6 +42,7 @@
 #include "runtime/globals.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/interfaceSupport.inline.hpp"
+#include "runtime/javaCalls.hpp"
 #include "runtime/javaThread.inline.hpp"
 #include "runtime/lightweightSynchronizer.hpp"
 #include "runtime/mutexLocker.hpp"
@@ -117,6 +118,7 @@ OopStorage* ObjectMonitor::_oop_storage = nullptr;
 
 OopHandle ObjectMonitor::_vthread_cxq_head;
 ParkEvent* ObjectMonitor::_vthread_unparker_ParkEvent = nullptr;
+Method* ObjectMonitor::_submit_vthread_method = nullptr;
 
 static void post_virtual_thread_pinned_event(JavaThread* current, const char* reason) {
   EventVirtualThreadPinned e;
@@ -1639,10 +1641,40 @@ void ObjectMonitor::ExitEpilog(JavaThread* current, ObjectWaiter* Wakee) {
   DTRACE_MONITOR_PROBE(contended__exit, this, object(), current);
 
   if (vthread == nullptr) {
-    // Platform thread case
+    // Platform thread case: just unpark
     Trigger->unpark();
-  } else if (java_lang_VirtualThread::set_onWaitingList(vthread, _vthread_cxq_head)) {
-    Trigger->unpark();
+  } else {
+    // Virtual thread case: submit to scheduler queue.
+    if (current->c1_monitorexit_is_leaf()) {
+      // Synchronized method exit while throwing exception from c1. We don't set
+      // up the call to be a non-leaf in this case so just use the special unblocker.
+      if (java_lang_VirtualThread::set_onWaitingList(vthread, _vthread_cxq_head)) {
+        Trigger->unpark();
+      }
+    } else if (java_lang_VirtualThread::should_submit(vthread)) {
+      PreservePreemptState pps(current);
+      Handle vthread_h (current, vthread);
+      JavaCallArguments args(vthread_h);
+      methodHandle m(current, submit_vthread_method());
+      JavaValue result(T_VOID);
+
+      // if (current->thread_state() == _thread_in_Java) {
+      //   JRT_BLOCK
+      //     JavaCalls::call(&result, m, &args, current);
+      //   JRT_BLOCK_END
+      // } else {
+      //   JavaCalls::call(&result, m, &args, current);
+      // }
+      JavaCalls::fast_call(&result, m, &args, current);
+
+      if (current->has_pending_exception()) {
+        // Exception occurred in Java call, fallback to special unblocker.
+        current->clear_pending_exception();
+        if (java_lang_VirtualThread::set_onWaitingList(vthread, _vthread_cxq_head)) {
+          Trigger->unpark();
+        }
+      }
+    }
   }
 
   // Maintain stats and report events to JVMTI
@@ -2015,6 +2047,11 @@ void ObjectMonitor::INotify(JavaThread* current) {
           old_state == java_lang_VirtualThread::TIMED_WAIT) {
         java_lang_VirtualThread::cmpxchg_state(vthread, old_state, java_lang_VirtualThread::BLOCKED);
       }
+      // Clear the unblocked field in case it was already set by some pending
+      // unblock task. Otherwise java_lang_VirtualThread::should_submit() will
+      // return false and neither the unblock task nor the thread exiting the
+      // monitor will submit this vthread again to the scheduler queue.
+      java_lang_VirtualThread::set_unblocked(vthread, false);
     }
 
     iterator->TState = ObjectWaiter::TS_ENTER;
@@ -2130,6 +2167,7 @@ void ObjectMonitor::VThreadWait(JavaThread* current, jlong millis) {
   exit(current);                     // exit the monitor
   guarantee(owner_raw() != owner_for(current), "invariant");
 
+  vthread = current->vthread(); // re-read after possible safepoint in exit
   assert(java_lang_VirtualThread::state(vthread) == java_lang_VirtualThread::RUNNING, "wrong state for vthread");
   java_lang_VirtualThread::set_state(vthread, millis == 0 ? java_lang_VirtualThread::WAITING : java_lang_VirtualThread::TIMED_WAITING);
   java_lang_VirtualThread::set_waitTimeout(vthread, millis);

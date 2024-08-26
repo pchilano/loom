@@ -229,8 +229,19 @@ void MonitorExitStub::emit_code(LIR_Assembler* ce) {
   } else {
     exit_id = Runtime1::monitorexit_nofpu_id;
   }
-  __ adr(lr, _continuation);
-  __ far_jump(RuntimeAddress(Runtime1::entry_for(exit_id)));
+  if (_info == nullptr) {
+    __ mov(rscratch2, true);
+    __ strb(rscratch2, Address(rthread, JavaThread::c1_monitorexit_is_leaf_offset()));
+    __ lea(lr, RuntimeAddress(Runtime1::entry_for(exit_id)));
+    __ blr(lr);
+    __ strb(zr, Address(rthread, JavaThread::c1_monitorexit_is_leaf_offset()));
+  } else {
+    __ lea(lr, RuntimeAddress(Runtime1::entry_for(exit_id)));
+    __ blr(lr);
+    ce->add_call_info_here(_info);
+    ce->verify_oop_map(_info);
+  }
+  __ b(_continuation);
 }
 
 

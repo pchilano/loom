@@ -42,6 +42,7 @@ ScopeDesc::ScopeDesc(const nmethod* code, PcDesc* pd, bool ignore_objects) {
   _return_oop    = pd->return_oop();
   _has_ea_local_in_scope = ignore_objects ? false : pd->has_ea_local_in_scope();
   _arg_escape    = ignore_objects ? false : pd->arg_escape();
+  _is_sync_exit_at_return = pd->sync_exit_at_return();
   decode_body();
 }
 
@@ -55,6 +56,7 @@ void ScopeDesc::initialize(const ScopeDesc* parent, int decode_offset) {
   _return_oop    = false;
   _has_ea_local_in_scope = parent->has_ea_local_in_scope();
   _arg_escape    = false;
+  _is_sync_exit_at_return = false;
   decode_body();
 }
 

@@ -44,6 +44,7 @@
 #include "classfile/systemDictionary.hpp"
 #include "classfile/vmClasses.hpp"
 #include "classfile/vmSymbols.hpp"
+#include "compiler/compilationPolicy.hpp"
 #include "gc/shared/collectedHeap.inline.hpp"
 #include "interpreter/bytecode.hpp"
 #include "interpreter/bytecodeUtils.hpp"
@@ -3953,7 +3954,7 @@ JVM_ENTRY(void, JVM_VirtualThreadHideFrames(JNIEnv* env, jclass clazz, jboolean 
     assert(!JvmtiExport::can_support_virtual_threads(), "sanity check");
     return;
   }
-  assert(!thread->is_in_VTMS_transition(), "sanity check");
+  assert(!thread->is_in_VTMS_transition() || thread->preempting(), "sanity check");
   assert(thread->is_in_tmp_VTMS_transition() != (bool)hide, "sanity check");
   thread->toggle_is_in_tmp_VTMS_transition();
 #endif
@@ -4006,6 +4007,20 @@ JVM_ENTRY(jobject, JVM_TakeVirtualThreadListToUnblock(JNIEnv* env, jclass ignore
     parkEvent->park();
   }
 JVM_END
+
+JVM_ENTRY_NO_ENV(void, JVM_VirtualThreadSetSubmitVThreadMethod(JNIEnv* env, jclass clazz))
+  InstanceKlass* ik = InstanceKlass::cast(vmClasses::VirtualThread_klass());
+  Method* m = nullptr;
+  // The klass must be linked before looking up the method.
+  if (!ik->link_class_or_fail(thread) ||
+      ((m = ik->find_method(SymbolTable::new_symbol("submitRunContinuation"), vmSymbols::void_method_signature())) == nullptr)) {
+    fatal("Unable to link/verify VirtualThread.submitRunContinuation() method");
+  }
+  ObjectMonitor::set_submit_vthread_method(m);
+  methodHandle mh(thread, m);
+  CompilationPolicy::compile_if_required(mh, CHECK_AND_CLEAR);
+JVM_END
+
 /*
  * Return the current class's class file version.  The low order 16 bits of the
  * returned jint contain the class's major version.  The high order 16 bits

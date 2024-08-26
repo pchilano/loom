@@ -42,6 +42,7 @@ class compiledVFrame: public javaVFrame {
   int                          vframe_id()          const { return _vframe_id; }
   bool                         has_ea_local_in_scope() const;
   bool                         arg_escape()         const; // at call with arg escape in parameter list
+  bool                         is_sync_exit_at_return() const;
 
   void set_locals(StackValueCollection* values) const;
 

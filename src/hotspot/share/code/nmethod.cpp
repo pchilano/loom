@@ -706,9 +706,11 @@ void nmethod::preserve_callee_argument_oops(frame fr, const RegisterMap *reg_map
     return;
   }
 
-  // handle the case of an anchor explicitly set in continuation code that doesn't have a callee
+  // handle the case of an anchor explicitly set in continuation code that doesn't have a callee.
+  // Also ignore the preempting case since there are no callee args to process. (We can get in these
+  // case from the monitorexit upcall to Java in Object.wait()).
   JavaThread* thread = reg_map->thread();
-  if (thread->has_last_Java_frame() && fr.sp() == thread->last_Java_sp()) {
+  if ((thread->has_last_Java_frame() && fr.sp() == thread->last_Java_sp()) || (method()->is_continuation_enter_intrinsic() && thread->preempting())) {
     return;
   }
 

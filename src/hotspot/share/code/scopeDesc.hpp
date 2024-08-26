@@ -76,6 +76,7 @@ class ScopeDesc : public ResourceObj {
   // any of the scopes at compiled pc.
   bool has_ea_local_in_scope() const { return _has_ea_local_in_scope; }
   bool arg_escape()       const { return _arg_escape; }
+  bool is_sync_exit_at_return() const { return _is_sync_exit_at_return; }
 
   GrowableArray<ScopeValue*>*   locals();
   GrowableArray<ScopeValue*>*   expressions();
@@ -108,6 +109,7 @@ class ScopeDesc : public ResourceObj {
   bool          _has_ea_local_in_scope;       // One or more NoEscape or ArgEscape objects exist in
                                               // any of the scopes at compiled pc.
   bool          _arg_escape;                  // Compiled Java call in youngest scope passes ArgEscape
+  bool          _is_sync_exit_at_return;
 
   // Decoding offsets
   int _decode_offset;

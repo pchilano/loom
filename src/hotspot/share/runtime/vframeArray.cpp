@@ -65,6 +65,7 @@ void vframeArrayElement::fill_in(compiledVFrame* vf, bool realloc_failures) {
   _method = vf->method();
   _bci    = vf->raw_bci();
   _reexecute = vf->should_reexecute();
+  _is_sync_exit_at_return = vf->is_sync_exit_at_return();
 #ifdef ASSERT
   _removed_monitors = false;
 #endif
@@ -194,16 +195,27 @@ void vframeArrayElement::unpack_on_stack(int caller_actual_parameters,
   address pc;
   bool use_next_mdp = false; // true if we should use the mdp associated with the next bci
                              // rather than the one associated with bcp
-  if (raw_bci() == SynchronizationEntryBCI) {
+  int bci = raw_bci();
+  if (bci == SynchronizationEntryBCI) {
     // We are deoptimizing while hanging in prologue code for synchronized method
     bcp = method()->bcp_from(0); // first byte code
     pc  = Interpreter::deopt_entry(vtos, 0); // step = 0 since we don't skip current bytecode
+  } else if (is_sync_exit_at_return()) {
+    assert(is_top_frame && method()->is_synchronized(), "");
+    assert(Bytecodes::is_return(Bytecodes::code_at(method(), bci)), "");
+    assert(monitors() == nullptr || monitors()->number_of_monitors() == 0, "");
+    assert(!thread->do_not_unlock_if_synchronized(), "recursive unlock?");
+
+    thread->set_do_not_unlock_if_synchronized(true);
+    bcp = method()->bcp_from(bci);
+    pc  = Interpreter::deopt_entry(vtos, 0);
   } else if (should_reexecute()) { //reexecute this bytecode
     assert(is_top_frame, "reexecute allowed only for the top frame");
-    bcp = method()->bcp_from(bci());
+    bcp = method()->bcp_from(bci);
+    assert(*bcp != Bytecodes::_monitorenter && *bcp != Bytecodes::_monitorexit, "");
     pc  = Interpreter::deopt_reexecute_entry(method(), bcp);
   } else {
-    bcp = method()->bcp_from(bci());
+    bcp = method()->bcp_from(bci);
     pc  = Interpreter::deopt_continue_after_entry(method(), bcp, callee_parameters, is_top_frame);
     use_next_mdp = true;
   }
@@ -223,7 +235,8 @@ void vframeArrayElement::unpack_on_stack(int caller_actual_parameters,
   //
   // For realloc failure exception we just pop frames, skip the guarantee.
 
-  assert(*bcp != Bytecodes::_monitorenter || is_top_frame, "a _monitorenter must be a top frame");
+  assert((*bcp != Bytecodes::_monitorenter && *bcp != Bytecodes::_monitorexit) ||
+         is_top_frame, "a _monitorenter/_monitorexit must be a top frame");
   assert(thread->deopt_compiled_method() != nullptr, "compiled method should be known");
   guarantee(realloc_failure_exception || !(thread->deopt_compiled_method()->is_compiled_by_c2() &&
               *bcp == Bytecodes::_monitorenter             &&
@@ -307,13 +320,21 @@ void vframeArrayElement::unpack_on_stack(int caller_actual_parameters,
 
   _frame.patch_pc(thread, pc);
 
-  assert (!method()->is_synchronized() || locks > 0 || _removed_monitors || raw_bci() == SynchronizationEntryBCI, "synchronized methods must have monitors");
+  assert (!method()->is_synchronized() || locks > 0 || _removed_monitors ||
+          bci == SynchronizationEntryBCI || is_sync_exit_at_return(), "synchronized methods must have monitors");
+
+  if (PrintDeoptimizationDetails) {
+    tty->print_cr("Monitor count: %d", locks);
+  }
 
   BasicObjectLock* top = iframe()->interpreter_frame_monitor_begin();
   for (int index = 0; index < locks; index++) {
     top = iframe()->previous_monitor_in_interpreter_frame(top);
     BasicObjectLock* src = _monitors->at(index);
     top->set_obj(src->obj());
+    if (PrintDeoptimizationDetails) {
+      tty->print_cr(" - Reconstructed BasicObjectLock at address " INTPTR_FORMAT, p2i(top));
+    }
     assert(src->obj() != nullptr || ObjectSynchronizer::current_thread_holds_lock(thread, Handle(thread, src->obj())),
            "should be held, before move_to");
     src->lock()->move_to(src->obj(), top->lock());

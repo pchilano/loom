@@ -44,7 +44,8 @@ class PcDesc {
     PCDESC_return_oop                = 1 << 2,
     PCDESC_rethrow_exception         = 1 << 3,
     PCDESC_has_ea_local_in_scope     = 1 << 4,
-    PCDESC_arg_escape                = 1 << 5
+    PCDESC_arg_escape                = 1 << 5,
+    PCDESC_sync_exit_at_return       = 1 << 6,
   };
 
   int _flags;
@@ -77,6 +78,9 @@ class PcDesc {
   void set_rethrow_exception(bool z)              { set_flag(PCDESC_rethrow_exception, z); }
   bool     should_reexecute()              const { return (_flags & PCDESC_reexecute) != 0; }
   void set_should_reexecute(bool z)              { set_flag(PCDESC_reexecute, z); }
+
+  bool     sync_exit_at_return()        const { return (_flags & PCDESC_sync_exit_at_return) != 0; }
+  void set_sync_exit_at_return(bool z)        { set_flag(PCDESC_sync_exit_at_return, z); }
 
   // Does pd refer to the same information as pd?
   bool is_same_info(const PcDesc* pd) {

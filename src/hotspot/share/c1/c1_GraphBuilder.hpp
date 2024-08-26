@@ -263,7 +263,7 @@ class GraphBuilder {
   void check_cast(int klass_index);
   void instance_of(int klass_index);
   void monitorenter(Value x, int bci);
-  void monitorexit(Value x, int bci);
+  void monitorexit(Value x, int bci, bool leaf_call, bool sync_exit_at_return = false);
   void new_multi_array(int dimensions);
   void throw_op(int bci);
   Value round_fp(Value fp_value);

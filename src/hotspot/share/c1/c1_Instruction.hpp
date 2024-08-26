@@ -1505,13 +1505,19 @@ LEAF(MonitorEnter, AccessMonitor)
 
 
 LEAF(MonitorExit, AccessMonitor)
+ private:
+  bool    _leaf_call;
+  bool    _sync_exit_at_return;
  public:
   // creation
-  MonitorExit(Value obj, int monitor_no)
-  : AccessMonitor(obj, monitor_no, nullptr)
+  MonitorExit(Value obj, int monitor_no, ValueStack* state_before, bool leaf_call, bool sync_exit_at_return)
+  : AccessMonitor(obj, monitor_no, state_before), _leaf_call(leaf_call), _sync_exit_at_return(sync_exit_at_return)
   {
     ASSERT_VALUES
   }
+
+  bool leaf_call()                               { return _leaf_call; }
+  bool sync_exit_at_return()                     { return _sync_exit_at_return; }
 };
 
 

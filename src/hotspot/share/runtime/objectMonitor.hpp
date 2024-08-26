@@ -153,6 +153,7 @@ class ObjectMonitor : public CHeapObj<mtObjectMonitor> {
 
   static OopHandle _vthread_cxq_head;
   static ParkEvent* _vthread_unparker_ParkEvent;
+  static Method* _submit_vthread_method;
 
   // The sync code expects the metadata field to be at offset zero (0).
   // Enforced by the assert() in metadata_addr().
@@ -222,6 +223,12 @@ class ObjectMonitor : public CHeapObj<mtObjectMonitor> {
 
   static OopHandle& vthread_cxq_head() { return _vthread_cxq_head; }
   static ParkEvent* vthread_unparker_ParkEvent() { return _vthread_unparker_ParkEvent; }
+
+  static void set_submit_vthread_method(Method* m) { _submit_vthread_method = m; }
+  static Method* submit_vthread_method() {
+    assert(_submit_vthread_method != nullptr, "should be initialized");
+    return _submit_vthread_method;
+  }
 
   // Only perform a PerfData operation if the PerfData object has been
   // allocated and if the PerfDataManager has not freed the PerfData
@@ -375,6 +382,22 @@ class ObjectMonitor : public CHeapObj<mtObjectMonitor> {
    public:
     ClearSuccOnSuspend(ObjectMonitor* om) : _om(om)  {}
     void operator()(JavaThread* current);
+  };
+  class PreservePreemptState {
+    JavaThread* _thread;
+    address _return_pc;
+   public:
+    PreservePreemptState(JavaThread* thread) : _thread(thread),
+      _return_pc(thread->preempt_alternate_return()) {
+        if (_return_pc != nullptr) {
+          thread->set_preempt_alternate_return(nullptr);
+        }
+      }
+    ~PreservePreemptState() {
+      if (_return_pc != nullptr) {
+       _thread->set_preempt_alternate_return(_return_pc);
+     }
+   }
   };
 
   bool      enter_is_async_deflating();

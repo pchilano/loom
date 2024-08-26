@@ -410,7 +410,7 @@ int LIR_Assembler::emit_unwind_handler() {
   MonitorExitStub* stub = nullptr;
   if (method()->is_synchronized()) {
     monitor_address(0, FrameMap::r0_opr);
-    stub = new MonitorExitStub(FrameMap::r0_opr, true, 0);
+    stub = new MonitorExitStub(FrameMap::r0_opr, true, 0, nullptr);
     if (LockingMode == LM_MONITOR) {
       __ b(*stub->entry());
     } else {
@@ -2519,7 +2519,7 @@ void LIR_Assembler::emit_lock(LIR_OpLock* op) {
   Register lock = op->lock_opr()->as_register();
   Register temp = op->scratch_opr()->as_register();
   if (LockingMode == LM_MONITOR) {
-    if (op->info() != nullptr) {
+    if (op->info() != nullptr && op->code() == lir_lock) {
       add_debug_info_for_null_check_here(op->info());
       __ null_check(obj, -1);
     }

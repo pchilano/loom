@@ -267,6 +267,8 @@ JVMState::JVMState(ciMethod* method, JVMState* caller) :
   assert(method != nullptr, "must be valid call site");
   _bci = InvocationEntryBci;
   _reexecute = Reexecute_Undefined;
+  _rethrow = false;
+  _sync_exit_at_return = false;
   debug_only(_bci = -99);  // random garbage value
   debug_only(_map = (SafePointNode*)-1);
   _caller = caller;
@@ -282,6 +284,8 @@ JVMState::JVMState(int stack_size) :
   _method(nullptr) {
   _bci = InvocationEntryBci;
   _reexecute = Reexecute_Undefined;
+  _rethrow = false;
+  _sync_exit_at_return = false;
   debug_only(_map = (SafePointNode*)-1);
   _caller = nullptr;
   _depth  = 1;
@@ -607,6 +611,7 @@ JVMState* JVMState::clone_shallow(Compile* C) const {
   JVMState* n = has_method() ? new (C) JVMState(_method, _caller) : new (C) JVMState(0);
   n->set_bci(_bci);
   n->_reexecute = _reexecute;
+  n->_sync_exit_at_return = _sync_exit_at_return;
   n->set_locoff(_locoff);
   n->set_stkoff(_stkoff);
   n->set_monoff(_monoff);
@@ -659,6 +664,9 @@ void JVMState::adapt_position(int delta) {
 // How much stack space would we need at this point in the program in
 // case of deoptimization?
 int JVMState::interpreter_frame_size() const {
+  if (!has_method()) {
+    return 0;
+  }
   const JVMState* jvms = this;
   int size = 0;
   int callee_parameters = 0;

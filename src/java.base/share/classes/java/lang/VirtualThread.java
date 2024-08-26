@@ -75,6 +75,7 @@ final class VirtualThread extends BaseVirtualThread {
 
     private static final long STATE = U.objectFieldOffset(VirtualThread.class, "state");
     private static final long PARK_PERMIT = U.objectFieldOffset(VirtualThread.class, "parkPermit");
+    private static final long UNBLOKED = U.objectFieldOffset(VirtualThread.class, "unblocked");
     private static final long CARRIER_THREAD = U.objectFieldOffset(VirtualThread.class, "carrierThread");
     private static final long TERMINATION = U.objectFieldOffset(VirtualThread.class, "termination");
     private static final long ON_WAITING_LIST = U.objectFieldOffset(VirtualThread.class, "onWaitingList");
@@ -294,6 +295,9 @@ final class VirtualThread extends BaseVirtualThread {
             // consume parking permit when continuing after parking
             if (initialState == UNPARKED) {
                 setParkPermit(false);
+            }
+            else if (initialState == UNBLOCKED) {
+                setUnblocked(false);
             }
         } else {
             // not runnable
@@ -958,10 +962,11 @@ final class VirtualThread extends BaseVirtualThread {
      */
     private void unblock() {
         assert !Thread.currentThread().isVirtual();
-        unblocked = true;
-        if (state() == BLOCKED && compareAndSetState(BLOCKED, UNBLOCKED)) {
-            unblocked = false;
-            submitRunContinuation();
+        if (!getAndSetUnblocked(true)) {
+            if (state() == BLOCKED && compareAndSetState(BLOCKED, UNBLOCKED)) {
+                //unblocked = false;
+                submitRunContinuation();
+            }
         }
     }
 
@@ -1494,6 +1499,20 @@ final class VirtualThread extends BaseVirtualThread {
         }
     }
 
+    private void setUnblocked(boolean newValue) {
+        if (unblocked != newValue) {
+            unblocked = newValue;
+        }
+    }
+
+    private boolean getAndSetUnblocked(boolean newValue) {
+        if (unblocked != newValue) {
+            return U.getAndSetBoolean(this, UNBLOKED, newValue);
+        } else {
+            return newValue;
+        }
+    }
+
     private void setCarrierThread(Thread carrier) {
         // U.putReferenceRelease(this, CARRIER_THREAD, carrier);
         this.carrierThread = carrier;
@@ -1667,11 +1686,13 @@ final class VirtualThread extends BaseVirtualThread {
      * if necessary until a list of one or more threads becomes available.
      */
     private static native VirtualThread takeVirtualThreadListToUnblock();
+    private static native void setSubmitVThreadMethod();
 
     static {
         var unblocker = InnocuousThread.newThread("VirtualThread-unblocker",
                 VirtualThread::unblockVirtualThreads);
         unblocker.setDaemon(true);
         unblocker.start();
+        setSubmitVThreadMethod();
     }
 }

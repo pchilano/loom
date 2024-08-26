@@ -1154,6 +1154,9 @@ JVM_VirtualThreadPinnedEvent(jint reasonCode, jstring reasonString);
 JNIEXPORT jobject JNICALL
 JVM_TakeVirtualThreadListToUnblock(JNIEnv* env, jclass ignored);
 
+JNIEXPORT void JNICALL
+JVM_VirtualThreadSetSubmitVThreadMethod(JNIEnv* env, jclass clazz);
+
 /*
  * Core reflection support.
  */

@@ -56,6 +56,7 @@ class vframeArrayElement {
     frame _frame;                                                // the interpreter frame we will unpack into
     int  _bci;                                                   // raw bci for this vframe
     bool _reexecute;                                             // whether we should reexecute this bytecode
+    bool _is_sync_exit_at_return;
     Method*    _method;                                          // the method for this vframe
     MonitorChunk* _monitors;                                     // active monitors for this vframe
     StackValueCollection* _locals;
@@ -72,6 +73,7 @@ class vframeArrayElement {
 
   int raw_bci(void) const            { return _bci; }
   bool should_reexecute(void) const  { return _reexecute; }
+  bool is_sync_exit_at_return(void) const  { return _is_sync_exit_at_return; }
 
   Method* method(void) const       { return _method; }
 

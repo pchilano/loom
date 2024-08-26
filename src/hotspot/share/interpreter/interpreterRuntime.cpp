@@ -68,6 +68,7 @@
 #include "runtime/javaCalls.hpp"
 #include "runtime/jfieldIDWorkaround.hpp"
 #include "runtime/osThread.hpp"
+#include "runtime/stackFrameStream.inline.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/stackWatermarkSet.hpp"
 #include "runtime/stubRoutines.hpp"
@@ -740,7 +741,19 @@ JRT_ENTRY_NO_ASYNC(void, InterpreterRuntime::monitorenter(JavaThread* current, B
 #endif
 JRT_END
 
-JRT_LEAF(void, InterpreterRuntime::monitorexit(BasicObjectLock* elem))
+JRT_BLOCK_ENTRY(void, InterpreterRuntime::monitorexit(JavaThread* current, BasicObjectLock* elem))
+#ifdef ASSERT
+  if (UseNewCode2) {
+    int count = 0;
+    frame last_frame = current->last_frame();
+    assert(last_frame.is_interpreted_frame(), "must be");
+    for (StackFrameStream fst(JavaThread::current(), true /* update */, true /* process_frames */); !fst.is_done(); fst.next()) {
+      fst.current()->verify(fst.register_map());
+      if (count++ > 30) break;   // that should be good enough
+    }
+  }
+#endif
+
   oop obj = elem->obj();
   assert(Universe::heap()->is_in(obj), "must be an object");
   // The object could become unlocked through a JNI call, which we have no other checks for.
@@ -751,7 +764,7 @@ JRT_LEAF(void, InterpreterRuntime::monitorexit(BasicObjectLock* elem))
     }
     return;
   }
-  ObjectSynchronizer::exit(obj, elem->lock(), JavaThread::current());
+  ObjectSynchronizer::exit(obj, elem->lock(), current);
   // Free entry. If it is not cleared, the exception handling code will try to unlock the monitor
   // again at method exit or in the case of an exception.
   elem->set_obj(nullptr);

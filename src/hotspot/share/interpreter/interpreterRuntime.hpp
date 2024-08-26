@@ -113,7 +113,7 @@ private:
  public:
   // Synchronization
   static void    monitorenter(JavaThread* current, BasicObjectLock* elem);
-  static void    monitorexit (BasicObjectLock* elem);
+  static void    monitorexit (JavaThread* current, BasicObjectLock* elem);
 
   static void    throw_illegal_monitor_state_exception(JavaThread* current);
   static void    new_illegal_monitor_state_exception(JavaThread* current);

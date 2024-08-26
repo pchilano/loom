@@ -762,7 +762,7 @@ JRT_BLOCK_ENTRY(void, Runtime1::monitorenter(JavaThread* current, oopDesc* obj, 
 JRT_END
 
 
-JRT_LEAF(void, Runtime1::monitorexit(JavaThread* current, BasicObjectLock* lock))
+JRT_BLOCK_ENTRY(void, Runtime1::monitorexit(JavaThread* current, BasicObjectLock* lock))
   assert(current == JavaThread::current(), "pre-condition");
 #ifndef PRODUCT
   if (PrintC1Statistics) {

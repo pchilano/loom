@@ -371,20 +371,27 @@ class MonitorEnterStub: public MonitorAccessStub {
 
 class MonitorExitStub: public MonitorAccessStub {
  private:
+  CodeEmitInfo* _info;
   bool _compute_lock;
   int  _monitor_ix;
 
  public:
-  MonitorExitStub(LIR_Opr lock_reg, bool compute_lock, int monitor_ix)
+  MonitorExitStub(LIR_Opr lock_reg, bool compute_lock, int monitor_ix, CodeEmitInfo* info)
     : MonitorAccessStub(LIR_OprFact::illegalOpr, lock_reg),
-      _compute_lock(compute_lock), _monitor_ix(monitor_ix) { }
+    _info(info), _compute_lock(compute_lock), _monitor_ix(monitor_ix) {
+    if (_info != nullptr) _info = new CodeEmitInfo(_info);
+  }
   virtual void emit_code(LIR_Assembler* e);
+  virtual CodeEmitInfo* info() const             { return _info; }
   virtual void visit(LIR_OpVisitState* visitor) {
     assert(_obj_reg->is_illegal(), "unused");
     if (_compute_lock) {
       visitor->do_temp(_lock_reg);
     } else {
       visitor->do_input(_lock_reg);
+    }
+    if (_info != nullptr) {
+      visitor->do_slow_case(_info);
     }
   }
 #ifndef PRODUCT

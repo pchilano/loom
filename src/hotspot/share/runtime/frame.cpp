@@ -339,7 +339,22 @@ bool frame::can_be_deoptimized() const {
   if(!nm->can_be_deoptimized())
     return false;
 
-  return !nm->is_at_poll_return(pc());
+  // If at the return point, then the frame has already been popped, and
+  // only the return needs to be executed. Don't deoptimize here.
+  if (nm->is_at_poll_return(pc())) {
+    return false;
+  }
+
+  ResourceMark rm;
+  ScopeDesc* sd = nm->scope_desc_at(pc());
+  if (sd->bci() == AfterExceptionBci) {
+    return false;
+  }
+  if (sd->is_top() && sd->bci() == AfterBci) {
+    return false;
+  }
+
+  return true;
 }
 
 void frame::deoptimize(JavaThread* thread) {

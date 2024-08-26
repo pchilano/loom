@@ -69,6 +69,7 @@
 #include "runtime/objectMonitor.inline.hpp"
 #include "runtime/perfData.hpp"
 #include "runtime/sharedRuntime.hpp"
+#include "runtime/stackFrameStream.inline.hpp"
 #include "runtime/stackWatermarkSet.hpp"
 #include "runtime/stubRoutines.hpp"
 #include "runtime/synchronizer.inline.hpp"
@@ -1966,6 +1967,17 @@ JRT_BLOCK_ENTRY(void, SharedRuntime::resume_monitor_operation(JavaThread* curren
 JRT_END
 
 void SharedRuntime::monitor_exit_helper(oopDesc* obj, BasicLock* lock, JavaThread* current) {
+  bool is_leaf = !current->has_last_Java_frame() || current->c1_monitorexit_is_leaf();
+#ifdef ASSERT
+  if (UseNewCode2 && !is_leaf) {
+    int count = 0;
+    for (StackFrameStream fst(current, true /* update */, true /* process_frames */); !fst.is_done(); fst.next()) {
+      fst.current()->verify(fst.register_map());
+      if (count++ > 30) break;   // that should be good enough
+    }
+  }
+#endif
+
   assert(JavaThread::current() == current, "invariant");
   // Exit must be non-blocking, and therefore no exceptions can be thrown.
   ExceptionMark em(current);
@@ -1977,11 +1989,29 @@ void SharedRuntime::monitor_exit_helper(oopDesc* obj, BasicLock* lock, JavaThrea
     }
     return;
   }
+
   ObjectSynchronizer::exit(obj, lock, current);
+  if (UseNewCode2 && !is_leaf) {
+    JRT_BLOCK_NO_ASYNC
+    // Stress deoptimization
+    RegisterMap reg_map(current,
+                       RegisterMap::UpdateMap::skip,
+                       RegisterMap::ProcessFrames::skip,
+                       RegisterMap::WalkContinuation::skip);
+    frame stubFrame = current->last_frame();
+    frame caller_fr = stubFrame.sender(&reg_map);
+    Deoptimization::deoptimize(current, caller_fr);
+    JRT_BLOCK_END
+  }
 }
 
 // Handles the uncommon cases of monitor unlocking in compiled code
 JRT_LEAF(void, SharedRuntime::complete_monitor_unlocking_C(oopDesc* obj, BasicLock* lock, JavaThread* current))
+  assert(current == JavaThread::current(), "pre-condition");
+  SharedRuntime::monitor_exit_helper(obj, lock, current);
+JRT_END
+
+JRT_BLOCK_ENTRY(void, SharedRuntime::complete_monitor_unlocking_C_nonleaf(oopDesc* obj, BasicLock* lock, JavaThread* current))
   assert(current == JavaThread::current(), "pre-condition");
   SharedRuntime::monitor_exit_helper(obj, lock, current);
 JRT_END

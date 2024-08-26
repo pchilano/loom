@@ -1997,6 +1997,7 @@ int java_lang_VirtualThread::_continuation_offset;
 int java_lang_VirtualThread::_state_offset;
 int java_lang_VirtualThread::_next_offset;
 int java_lang_VirtualThread::_onWaitingList_offset;
+int java_lang_VirtualThread::_unblocked_offset;
 int java_lang_VirtualThread::_notified_offset;
 int java_lang_VirtualThread::_recheckInterval_offset;
 int java_lang_VirtualThread::_waitTimeout_offset;
@@ -2008,6 +2009,7 @@ int java_lang_VirtualThread::_waitTimeout_offset;
   macro(_state_offset,                     k, "state",              int_signature,               false); \
   macro(_next_offset,                      k, "next",               vthread_signature,           false); \
   macro(_onWaitingList_offset,             k, "onWaitingList",      byte_signature,              false); \
+  macro(_unblocked_offset,                 k, "unblocked",          bool_signature,              false); \
   macro(_notified_offset,                  k, "notified",           bool_signature,              false); \
   macro(_recheckInterval_offset,           k, "recheckInterval",    byte_signature,              false); \
   macro(_waitTimeout_offset,               k, "waitTimeout",        long_signature,              false);
@@ -2040,10 +2042,10 @@ void java_lang_VirtualThread::set_state(oop vthread, int state) {
   vthread->release_int_field_put(_state_offset, state);
 }
 
-int java_lang_VirtualThread::cmpxchg_state(oop vthread, int old_state, int new_state) {
+bool java_lang_VirtualThread::cmpxchg_state(oop vthread, int old_state, int new_state) {
   jint* addr = vthread->field_addr<jint>(_state_offset);
   int res = Atomic::cmpxchg(addr, old_state, new_state);
-  return res;
+  return res == old_state;
 }
 
 oop java_lang_VirtualThread::next(oop vthread) {
@@ -2069,6 +2071,24 @@ bool java_lang_VirtualThread::set_onWaitingList(oop vthread, OopHandle& list_hea
     }
   }
   return false; // already on waiting list
+}
+
+bool java_lang_VirtualThread::should_submit(oop vthread) {
+  if (!vthread->bool_field_volatile(_unblocked_offset)) {
+    jboolean* addr = vthread->field_addr<jboolean>(_unblocked_offset);
+    int res = Atomic::cmpxchg(addr, (jboolean)JNI_FALSE, (jboolean)JNI_TRUE);
+    if (!res) {
+      int curr_state = state(vthread);
+      if (curr_state == BLOCKED && cmpxchg_state(vthread, BLOCKED, UNBLOCKED)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void java_lang_VirtualThread::set_unblocked(oop vthread, bool val) {
+  vthread->bool_field_put_volatile(_unblocked_offset, val);
 }
 
 void java_lang_VirtualThread::set_notified(oop vthread, jboolean value) {

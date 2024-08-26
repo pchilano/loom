@@ -50,10 +50,12 @@ class JavaCallWrapper: StackObj {
   JavaFrameAnchor  _anchor;                 // last thread anchor state that we must restore
 
   JavaValue*       _result;                 // result value
+  bool             _fast;
+  bool             _fix_state;
 
  public:
   // Construction/destruction
-   JavaCallWrapper(const methodHandle& callee_method, Handle receiver, JavaValue* result, TRAPS);
+   JavaCallWrapper(const methodHandle& callee_method, Handle receiver, JavaValue* result, bool fast, TRAPS);
   ~JavaCallWrapper();
 
   // Accessors
@@ -67,6 +69,7 @@ class JavaCallWrapper: StackObj {
   void             oops_do(OopClosure* f);
 
   bool             is_first_frame() const   { return _anchor.last_Java_sp() == nullptr; }
+  bool             fast() const             { return _fast; }
 
 };
 
@@ -212,6 +215,7 @@ class JavaCallArguments : public StackObj {
 
 class JavaCalls: AllStatic {
   static void call_helper(JavaValue* result, const methodHandle& method, JavaCallArguments* args, TRAPS);
+  static void fast_call_helper(JavaValue* result, const methodHandle& method, JavaCallArguments* args, TRAPS);
  public:
   // call_special
   // ------------
@@ -250,6 +254,9 @@ class JavaCalls: AllStatic {
 
   // Low-level interface
   static void call(JavaValue* result, const methodHandle& method, JavaCallArguments* args, TRAPS);
+
+  // Low-level interface
+  static void fast_call(JavaValue* result, const methodHandle& method, JavaCallArguments* args, TRAPS);
 };
 
 #endif // SHARE_RUNTIME_JAVACALLS_HPP

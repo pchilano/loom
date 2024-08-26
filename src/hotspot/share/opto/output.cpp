@@ -1073,6 +1073,8 @@ void PhaseOutput::Process_OopMap_Node(MachNode *mach, int current_offset) {
             !method->is_synchronized() ||
             method->is_native() ||
             num_mon > 0 ||
+            jvms->bci() < 0 ||
+            jvms->is_sync_exit_at_return() ||
             !GenerateSynchronizationCode,
             "monitors must always exist for synchronized methods");
 
@@ -1178,17 +1180,18 @@ void PhaseOutput::Process_OopMap_Node(MachNode *mach, int current_offset) {
     // Make method available for all Safepoints
     ciMethod* scope_method = method ? method : C->method();
     // Describe the scope here
-    assert(jvms->bci() >= InvocationEntryBci && jvms->bci() <= 0x10000, "must be a valid or entry BCI");
+    assert(jvms->bci() >= MinBci && jvms->bci() <= 0x10000, "must be a valid or entry BCI");
     assert(!jvms->should_reexecute() || depth == max_depth, "reexecute allowed only for the youngest");
     // Now we can describe the scope.
     methodHandle null_mh;
-    bool rethrow_exception = false;
+    bool rethrow_exception = jvms->rethrow_exception();
     C->debug_info()->describe_scope(
       safepoint_pc_offset,
       null_mh,
       scope_method,
       jvms->bci(),
       jvms->should_reexecute(),
+      jvms->is_sync_exit_at_return(),
       rethrow_exception,
       is_method_handle_invoke,
       return_oop,

@@ -104,6 +104,7 @@ class DebugInformationRecorder: public ResourceObj {
                       ciMethod*   method,
                       int         bci,
                       bool        reexecute,
+                      bool        sync_exit_at_return = false,
                       bool        rethrow_exception = false,
                       bool        is_method_handle_invoke = false,
                       bool        return_oop = false,

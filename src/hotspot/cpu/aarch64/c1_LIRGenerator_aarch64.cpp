@@ -340,7 +340,13 @@ void LIRGenerator::do_MonitorExit(MonitorExit* x) {
   LIR_Opr obj_temp = new_register(T_INT);
   LIR_Opr scratch = new_register(T_INT);
   set_no_result(x);
-  monitor_exit(obj_temp, lock, syncTempOpr(), scratch, x->monitor_no());
+
+  CodeEmitInfo* info = nullptr;
+  if (!x->leaf_call()) {
+    info = state_for(x, x->state(), true);
+    if (x->sync_exit_at_return()) info->set_sync_exit_at_return();
+  }
+  monitor_exit(obj_temp, lock, syncTempOpr(), scratch, x->monitor_no(), info);
 }
 
 void LIRGenerator::do_NegateOp(NegateOp* x) {

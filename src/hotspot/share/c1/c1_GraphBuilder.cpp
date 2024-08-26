@@ -1632,7 +1632,13 @@ void GraphBuilder::method_return(Value x, bool ignore_return) {
     // released before we jump to the continuation block.
     if (method()->is_synchronized()) {
       assert(state()->locks_size() == 1, "receiver must be locked here");
-      monitorexit(state()->lock_at(0), SynchronizationEntryBCI);
+      if (x != nullptr && !ignore_return) {
+        state()->push(x->type(), x);
+      }
+      monitorexit(state()->lock_at(0), bci(), false /*leaf_call*/, true /* sync_exit_at_return */);
+      if (x != nullptr && !ignore_return) {
+        state()->pop(x->type());
+      }
     }
 
     if (need_mem_bar) {
@@ -1667,7 +1673,6 @@ void GraphBuilder::method_return(Value x, bool ignore_return) {
     return;
   }
 
-  state()->truncate_stack(0);
   if (method()->is_synchronized()) {
     // perform the unlocking before exiting the method
     Value receiver;
@@ -1676,8 +1681,12 @@ void GraphBuilder::method_return(Value x, bool ignore_return) {
     } else {
       receiver = append(new Constant(new ClassConstant(method()->holder())));
     }
-    append_split(new MonitorExit(receiver, state()->unlock()));
+    if (x != nullptr && !ignore_return) {
+      state()->push(x->type(), x);
+    }
+    monitorexit(receiver, bci(), false /*leaf_call*/, true /* sync_exit_at_return */);
   }
+  state()->truncate_stack(0);
 
   if (need_mem_bar) {
       append(new MemBar(lir_membar_storestore));
@@ -2325,8 +2334,9 @@ void GraphBuilder::monitorenter(Value x, int bci) {
 }
 
 
-void GraphBuilder::monitorexit(Value x, int bci) {
-  append_with_bci(new MonitorExit(x, state()->unlock()), bci);
+void GraphBuilder::monitorexit(Value x, int bci, bool leaf_call, bool sync_exit_at_return) {
+  ValueStack* state_before = copy_state_for_exception_with_bci(bci);
+  append_with_bci(new MonitorExit(x, state()->unlock(), state_before, leaf_call, sync_exit_at_return), bci);
   kill_all();
 }
 
@@ -2980,7 +2990,7 @@ BlockEnd* GraphBuilder::iterate_bytecodes_for_block(int bci) {
       case Bytecodes::_checkcast      : check_cast(s.get_index_u2()); break;
       case Bytecodes::_instanceof     : instance_of(s.get_index_u2()); break;
       case Bytecodes::_monitorenter   : monitorenter(apop(), s.cur_bci()); break;
-      case Bytecodes::_monitorexit    : monitorexit (apop(), s.cur_bci()); break;
+      case Bytecodes::_monitorexit    : monitorexit (apop(), s.cur_bci(), false /*leaf_call*/); break;
       case Bytecodes::_wide           : ShouldNotReachHere(); break;
       case Bytecodes::_multianewarray : new_multi_array(s.cur_bcp()[3]); break;
       case Bytecodes::_ifnull         : if_null(objectType, If::eql); break;
@@ -3860,7 +3870,8 @@ void GraphBuilder::fill_sync_handler(Value lock, BlockBegin* sync_handler, bool 
     }
 
     // exit the monitor in the context of the synchronized method
-    monitorexit(lock, bci);
+    // don't allow deoptimization so make it a leaf
+    monitorexit(lock, bci, true /*leaf_call*/);
 
     // exit the context of the synchronized method
     if (!default_handler) {

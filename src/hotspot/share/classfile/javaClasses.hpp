@@ -528,6 +528,7 @@ class java_lang_VirtualThread : AllStatic {
   static int _state_offset;
   static int _next_offset;
   static int _onWaitingList_offset;
+  static int _unblocked_offset;
   static int _notified_offset;
   static int _recheckInterval_offset;
   static int _waitTimeout_offset;
@@ -573,10 +574,12 @@ class java_lang_VirtualThread : AllStatic {
   static oop continuation(oop vthread);
   static int state(oop vthread);
   static void set_state(oop vthread, int state);
-  static int cmpxchg_state(oop vthread, int old_state, int new_state);
+  static bool cmpxchg_state(oop vthread, int old_state, int new_state);
   static oop next(oop vthread);
   static void set_next(oop vthread, oop next_vthread);
   static bool set_onWaitingList(oop vthread, OopHandle& list_head);
+  static bool should_submit(oop vthread);
+  static void set_unblocked(oop vthread, bool val);
   static jbyte recheckInterval(oop vthread);
   static void set_recheckInterval(oop vthread, jbyte value);
   static jlong waitTimeout(oop vthread);

@@ -394,6 +394,15 @@ bool compiledVFrame::arg_escape() const {
   return scope()->arg_escape();
 }
 
+bool compiledVFrame::is_sync_exit_at_return() const {
+  if (scope() == nullptr) {
+    // native nmethod, all objs escape
+    assert(code()->is_native_method(), "must be native");
+    return false;
+  }
+  return scope()->is_sync_exit_at_return();
+}
+
 vframe* compiledVFrame::sender() const {
   const frame f = fr();
   if (scope() == nullptr) {

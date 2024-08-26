@@ -235,21 +235,22 @@ class IRScopeDebugInfo: public CompilationResourceObj {
   //Whether we should reexecute this bytecode for deopt
   bool should_reexecute();
 
-  void record_debug_info(DebugInformationRecorder* recorder, int pc_offset, bool reexecute, bool is_method_handle_invoke = false) {
+  void record_debug_info(DebugInformationRecorder* recorder, int pc_offset, bool reexecute, bool is_method_handle_invoke, bool sync_exit_at_return) {
     if (caller() != nullptr) {
       // Order is significant:  Must record caller first.
-      caller()->record_debug_info(recorder, pc_offset, false/*reexecute*/);
+      // reexecute and sync_exit_at_return allowed only for the topmost frame
+      caller()->record_debug_info(recorder, pc_offset, false/*reexecute*/, false/*is_method_handle_invoke*/, false/*sync_exit_at_return*/);
     }
     DebugToken* locvals = recorder->create_scope_values(locals());
     DebugToken* expvals = recorder->create_scope_values(expressions());
     DebugToken* monvals = recorder->create_monitor_values(monitors());
-    // reexecute allowed only for the topmost frame
+
     bool return_oop = false; // This flag will be ignored since it used only for C2 with escape analysis.
     bool rethrow_exception = false;
     bool has_ea_local_in_scope = false;
     bool arg_escape = false;
-    recorder->describe_scope(pc_offset, methodHandle(), scope()->method(), bci(),
-                             reexecute, rethrow_exception, is_method_handle_invoke, return_oop,
+    recorder->describe_scope(pc_offset, methodHandle(), scope()->method(), bci(), reexecute,
+                             sync_exit_at_return, rethrow_exception, is_method_handle_invoke, return_oop,
                              has_ea_local_in_scope, arg_escape, locvals, expvals, monvals);
   }
 };
@@ -266,6 +267,7 @@ class CodeEmitInfo: public CompilationResourceObj {
   bool              _is_method_handle_invoke;    // true if the associated call site is a MethodHandle call site.
   bool              _deoptimize_on_exception;
   bool              _force_reexecute;            // force the reexecute flag on, used for patching stub
+  bool              _sync_exit_at_return;
 
   FrameMap*     frame_map() const                { return scope()->compilation()->frame_map(); }
   Compilation*  compilation() const              { return scope()->compilation(); }
@@ -294,6 +296,9 @@ class CodeEmitInfo: public CompilationResourceObj {
 
   bool     force_reexecute() const         { return _force_reexecute;             }
   void     set_force_reexecute()           { _force_reexecute = true;             }
+
+  bool     is_sync_exit_at_return() const  { return _sync_exit_at_return;         }
+  void     set_sync_exit_at_return()       { _sync_exit_at_return = true;         }
 
   int interpreter_frame_size() const;
 

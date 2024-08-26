@@ -53,13 +53,32 @@
 // -----------------------------------------------------
 // Implementation of JavaCallWrapper
 
-JavaCallWrapper::JavaCallWrapper(const methodHandle& callee_method, Handle receiver, JavaValue* result, TRAPS) {
+JavaCallWrapper::JavaCallWrapper(const methodHandle& callee_method, Handle receiver, JavaValue* result, bool fast, TRAPS) {
   JavaThread* thread = THREAD;
+
+  _fast = fast;
+  _fix_state = false;
 
   guarantee(thread->is_Java_thread(), "crucial check - the VM thread cannot and must not escape to Java code");
   assert(!thread->owns_locks(), "must release all locks when leaving VM");
   guarantee(thread->can_call_java(), "cannot make java calls from the native compiler");
   _result   = result;
+
+  if (fast) {
+    _callee_method = callee_method();
+    _receiver = receiver();
+    _thread       = thread;
+    if (thread->thread_state() == _thread_in_vm) {
+      thread->set_thread_state(_thread_in_Java);
+      _fix_state = true;
+    }
+    _handles      = _thread->active_handles();    // save previous handle block & Java frame linkage
+    _anchor.copy(_thread->frame_anchor());
+    _thread->frame_anchor()->clear();
+    debug_only(_thread->inc_java_call_counter());
+    MACOS_AARCH64_ONLY(_thread->enable_wx(WXExec));
+    return;
+  }
 
   // Allocate handle block for Java code. This must be done before we change thread_state to _thread_in_Java_or_stub,
   // since it can potentially block.
@@ -103,6 +122,16 @@ JavaCallWrapper::~JavaCallWrapper() {
   assert(_thread == JavaThread::current(), "must still be the same thread");
 
   MACOS_AARCH64_ONLY(_thread->enable_wx(WXWrite));
+
+  if (_fast) {
+    _thread->frame_anchor()->zap();
+    debug_only(_thread->dec_java_call_counter());
+    if (_fix_state) {
+      _thread->set_thread_state(_thread_in_vm);
+    }
+    _thread->frame_anchor()->copy(&_anchor);
+    return;
+  }
 
   // restore previous handle block & Java frame linkage
   JNIHandleBlock *_old_handles = _thread->active_handles();
@@ -383,7 +412,7 @@ void JavaCalls::call_helper(JavaValue* result, const methodHandle& method, JavaC
   }
 
   // do call
-  { JavaCallWrapper link(method, receiver, result, CHECK);
+  { JavaCallWrapper link(method, receiver, result, false, CHECK);
     { HandleMark hm(thread);  // HandleMark used by HandleMarkCleaner
 
       // NOTE: if we move the computation of the result_val_address inside
@@ -449,6 +478,75 @@ void JavaCalls::call_helper(JavaValue* result, const methodHandle& method, JavaC
   }
 }
 
+void JavaCalls::fast_call(JavaValue* result, const methodHandle& method, JavaCallArguments* args, TRAPS) {
+  // Check if we need to wrap a potential OS exception handler around thread.
+  // This is used for e.g. Win32 structured exception handlers.
+  // Need to wrap each and every time, since there might be native code down the
+  // stack that has installed its own exception handlers.
+  os::os_exception_wrapper(fast_call_helper, result, method, args, THREAD);
+}
+
+void JavaCalls::fast_call_helper(JavaValue* result, const methodHandle& method, JavaCallArguments* args, TRAPS) {
+  JavaThread* thread = THREAD;
+  assert(method.not_null(), "must have a method to call");
+  assert(!SafepointSynchronize::is_at_safepoint(), "call to Java code during VM operation");
+  assert(!thread->handle_area()->no_handle_mark_active(), "cannot call out to Java here");
+
+#ifdef ASSERT
+  { InstanceKlass* holder = method->method_holder();
+    // A klass might not be initialized since JavaCall's might be used during the executing of
+    // the <clinit>. For example, a Thread.start might start executing on an object that is
+    // not fully initialized! (bad Java programming style)
+    assert(holder->is_linked(), "rewriting must have taken place");
+  }
+#endif
+
+  //CompilationPolicy::compile_if_required(method, CHECK);
+
+  // Since the call stub sets up like the interpreter we call the from_interpreted_entry
+  // so we can go compiled via a i2c. Otherwise initial entry method will always
+  // run interpreted.
+  address entry_point = method->from_interpreted_entry();
+
+  // Find receiver
+  Handle receiver = args->receiver();
+
+  // do call
+  { JavaCallWrapper link(method, receiver, result, true, CHECK);
+    { HandleMark hm(thread);  // HandleMark used by HandleMarkCleaner
+
+      // NOTE: if we move the computation of the result_val_address inside
+      // the call to call_stub, the optimizer produces wrong code.
+      intptr_t* result_val_address = (intptr_t*)(result->get_value_addr());
+      intptr_t* parameter_address = args->parameters();
+#if INCLUDE_JVMCI
+      // Gets the alternative target (if any) that should be called
+      Handle alternative_target = args->alternative_target();
+      if (!alternative_target.is_null()) {
+        // Must extract verified entry point from HotSpotNmethod after VM to Java
+        // transition in JavaCallWrapper constructor so that it is safe with
+        // respect to nmethod sweeping.
+        address verified_entry_point = (address) HotSpotJVMCI::InstalledCode::entryPoint(nullptr, alternative_target());
+        if (verified_entry_point != nullptr) {
+          thread->set_jvmci_alternate_call_target(verified_entry_point);
+          entry_point = method->adapter()->get_i2c_entry();
+        }
+      }
+#endif
+      StubRoutines::call_stub()(
+        (address)&link,
+        // (intptr_t*)&(result->_value), // see NOTE above (compiler problem)
+        result_val_address,          // see NOTE above (compiler problem)
+        T_INT,
+        method(),
+        entry_point,
+        parameter_address,
+        args->size_of_parameters(),
+        CHECK
+      );
+    }
+  }
+}
 
 //--------------------------------------------------------------------------------------
 // Implementation of JavaCallArguments
