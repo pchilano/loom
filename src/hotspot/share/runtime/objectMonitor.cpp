@@ -1213,15 +1213,13 @@ bool ObjectMonitor::VThreadMonitorEnter(JavaThread* current, ObjectWaiter* waite
   return false;
 }
 
-void ObjectMonitor::resume_operation(JavaThread* current, ObjectWaiter* node) {
+bool ObjectMonitor::resume_operation(JavaThread* current, ObjectWaiter* node) {
   assert(java_lang_VirtualThread::state(current->vthread()) == java_lang_VirtualThread::RUNNING, "wrong state for vthread");
   assert(current->is_in_VTMS_transition(), "must be");
 
   if (node->is_wait() && !node->at_reenter()) {
-    bool notified = VThreadWaitReenter(current, node);
-    if (!notified) return;
-    // Notified case. We were already added to CXQ or TS_ENTER
-    // by the notifier so just try to reenter the monitor.
+    bool acquired_monitor = VThreadWaitReenter(current, node);
+    if (acquired_monitor) return true;
   }
 
   // Retry acquiring monitor...
@@ -1231,7 +1229,7 @@ void ObjectMonitor::resume_operation(JavaThread* current, ObjectWaiter* node) {
 
   if (TryLock(current) == TryLockResult::Success) {
     VThreadEpilog(current, node);
-    return;
+    return true;
   }
 
   oop vthread = current->vthread();
@@ -1242,7 +1240,7 @@ void ObjectMonitor::resume_operation(JavaThread* current, ObjectWaiter* node) {
 
   if (TryLock(current) == TryLockResult::Success) {
     VThreadEpilog(current, node);
-    return;
+    return true;
   }
 
   // Update recheck interval in case we are the _Responsible.
@@ -1260,8 +1258,9 @@ void ObjectMonitor::resume_operation(JavaThread* current, ObjectWaiter* node) {
 
   // The JT will read this variable on return to the resume_monitor_operation stub
   // and will unmount (enterSpecial frame removed and return to Continuation.run()).
-  current->set_preempting(true);
   java_lang_VirtualThread::set_state(vthread, java_lang_VirtualThread::BLOCKING);
+
+  return false;
 }
 
 void ObjectMonitor::VThreadEpilog(JavaThread* current, ObjectWaiter* node) {
@@ -2186,16 +2185,13 @@ bool ObjectMonitor::VThreadWaitReenter(JavaThread* current, ObjectWaiter* node) 
       oop cont = java_lang_VirtualThread::continuation(current->vthread());
       stackChunkOop chunk  = jdk_internal_vm_Continuation::tail(cont);
       chunk->set_object_waiter(nullptr);
-    } else {
-      // The JT will read this variable on return to the resume_monitor_operation stub
-      // and will unmount (enterSpecial frame removed and return to Continuation.run()).
-      current->set_preempting(true);
+      return true;
     }
   } else {
     // Already moved to _cxq or _EntryList by notifier, so just add to contentions.
     add_to_contentions(1);
   }
-  return was_notified;
+  return false;
 }
 
 // -----------------------------------------------------------------------------

@@ -386,7 +386,7 @@ class ObjectMonitor : public CHeapObj<mtObjectMonitor> {
   bool      spin_enter(JavaThread* current);
   void      enter_with_contention_mark(JavaThread* current, ObjectMonitorContentionMark& contention_mark);
   void      exit(JavaThread* current, bool not_suspended = true);
-  void      resume_operation(JavaThread* current, ObjectWaiter* node);
+  bool      resume_operation(JavaThread* current, ObjectWaiter* node);
   void      wait(jlong millis, bool interruptible, TRAPS);
   void      notify(TRAPS);
   void      notifyAll(TRAPS);
