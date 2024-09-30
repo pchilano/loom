@@ -841,7 +841,7 @@ void C2_MacroAssembler::fast_unlock_lightweight(Register obj, Register reg_rax, 
   }
 
   bind(unlocked);
-  xorl(t, t); // Fast Unlock ZF = 1
+  xorl(t1, t1); // Fast Unlock ZF = 1
 
 #ifdef ASSERT
   // Check that unlocked label is reached with ZF set.

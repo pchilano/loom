@@ -886,7 +886,8 @@ void ObjectMonitor::EnterI(JavaThread* current) {
 
   // For virtual threads that are pinned, do a timed-park instead to
   // alleviate some deadlocks cases where succesor cannot run.
-  int recheckInterval = 1;
+  static int MAX_RECHECK_INTERVAL = 1000;
+  int recheck_interval = 1;
   bool do_timed_parked = false;
   ContinuationEntry* ce = current->last_continuation();
   if (ce != nullptr && ce->is_virtual_thread()) {
@@ -902,11 +903,11 @@ void ObjectMonitor::EnterI(JavaThread* current) {
 
     // park self
     if (do_timed_parked) {
-      current->_ParkEvent->park((jlong) recheckInterval);
-      // Increase the recheckInterval, but clamp the value.
-      recheckInterval *= 8;
-      if (recheckInterval > MAX_RECHECK_INTERVAL) {
-        recheckInterval = MAX_RECHECK_INTERVAL;
+      current->_ParkEvent->park((jlong) recheck_interval);
+      // Increase the recheck_interval, but clamp the value.
+      recheck_interval *= 8;
+      if (recheck_interval > MAX_RECHECK_INTERVAL) {
+        recheck_interval = MAX_RECHECK_INTERVAL;
       }
     } else {
       current->_ParkEvent->park();
